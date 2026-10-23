@@ -1,0 +1,96 @@
+# Vulnerability and misconfiguration scanning with Trivy.
+#   image  - scan a locally built container image before it is pushed
+#   fs     - scan the source tree (dependency lock files + IaC misconfigurations)
+#   config - scan IaC only (Terraform, Kubernetes, Helm, Dockerfile)
+# A SARIF report is always produced; the gate is evaluated in a second pass
+# against the same local vulnerability database, so the report exists even when
+# the gate fails.
+
+parameters:
+  - name: scanType
+    displayName: Trivy scan target type
+    type: string
+    values:
+      - image
+      - fs
+      - config
+  - name: target
+    displayName: Image reference or directory to scan
+    type: string
+  - name: severity
+    displayName: Severities that fail the gate
+    type: string
+    default: HIGH,CRITICAL
+    values:
+      - CRITICAL
+      - HIGH,CRITICAL
+      - MEDIUM,HIGH,CRITICAL
+  - name: ignoreUnfixed
+    displayName: Ignore vulnerabilities without an available fix (image and fs only)
+    type: boolean
+    default: true
+  - name: failOnFindings
+    displayName: Fail the step when findings at or above the severity are present
+    type: boolean
+    default: true
+  - name: artifactName
+    displayName: Pipeline artifact name for the SARIF report
+    type: string
+    default: security-trivy
+  - name: version
+    displayName: Trivy version
+    type: string
+    default: 0.75.0
+  - name: sha256
+    displayName: SHA-256 of the Linux-64bit release archive for the chosen version
+    type: string
+    default: c6e65abddb348e25f10549df887045629cf28cc72453cd1c63acb717316b3f3f
+
+steps:
+  - template: install-tool.yml
+    parameters:
+      name: trivy
+      version: ${{ parameters.version }}
+      url: https://github.com/aquasecurity/trivy/releases/download/v${{ parameters.version }}/trivy_${{ parameters.version }}_Linux-64bit.tar.gz
+      sha256: ${{ parameters.sha256 }}
+      binary: trivy
+
+  - bash: |
+      set -euo pipefail
+      report_dir="$(Build.ArtifactStagingDirectory)/trivy-${SCAN_TYPE}"
+      mkdir -p "${report_dir}"
+      args=(--severity "${SEVERITY}" --no-progress)
+      case "${SCAN_TYPE}" in
+        image) args+=(--scanners vuln,secret) ;;
+        fs) args+=(--scanners vuln,misconfig) ;;
+        config) ;;
+      esac
+      if [[ "${SCAN_TYPE}" != "config" && "${IGNORE_UNFIXED,,}" == "true" ]]; then
+        args+=(--ignore-unfixed)
+      fi
+      exit_code=0
+      if [[ "${FAIL_ON_FINDINGS,,}" == "true" ]]; then
+        exit_code=1
+      fi
+      # Pass 1: full SARIF report for the Scans tab / Defender for DevOps.
+      trivy "${SCAN_TYPE}" "${args[@]}" --format sarif --output "${report_dir}/trivy.sarif" --exit-code 0 "${TARGET}"
+      # Pass 2: human-readable table and the actual gate (re-uses the database from pass 1).
+      gate_args=()
+      if [[ "${SCAN_TYPE}" != "config" ]]; then
+        gate_args+=(--skip-db-update)
+      fi
+      trivy "${SCAN_TYPE}" "${args[@]}" "${gate_args[@]}" --format table --exit-code "${exit_code}" "${TARGET}"
+    displayName: Trivy ${{ parameters.scanType }} scan (${{ parameters.severity }})
+    env:
+      SCAN_TYPE: ${{ parameters.scanType }}
+      TARGET: ${{ parameters.target }}
+      SEVERITY: ${{ parameters.severity }}
+      IGNORE_UNFIXED: ${{ parameters.ignoreUnfixed }}
+      FAIL_ON_FINDINGS: ${{ parameters.failOnFindings }}
+
+  - task: PublishPipelineArtifact@1
+    displayName: Publish Trivy report
+    condition: succeededOrFailed()
+    inputs:
+      targetPath: $(Build.ArtifactStagingDirectory)/trivy-${{ parameters.scanType }}
+      artifact: ${{ parameters.artifactName }}-$(System.JobAttempt)

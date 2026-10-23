@@ -1,0 +1,59 @@
+# Installs a pinned CLI binary from an upstream release and verifies its SHA-256
+# digest before it is put on PATH. Every security tool in this library is
+# installed through this step, so a tampered or swapped release asset fails the
+# pipeline instead of silently running.
+#
+# All parameters are passed to the script through environment variables rather
+# than being interpolated into the script body, which prevents script injection.
+
+parameters:
+  - name: name
+    displayName: Tool name, used for the tool-cache folder and log output
+    type: string
+  - name: version
+    displayName: Tool version (informational and part of the cache path)
+    type: string
+  - name: url
+    displayName: Download URL of the release asset
+    type: string
+  - name: sha256
+    displayName: Expected SHA-256 digest of the downloaded asset
+    type: string
+  - name: archive
+    displayName: Asset packaging
+    type: string
+    default: tar.gz
+    values:
+      - tar.gz
+      - none
+  - name: binary
+    displayName: Executable name inside the archive (or target name when archive is none)
+    type: string
+
+steps:
+  - bash: |
+      set -euo pipefail
+      dest="${AGENT_TOOLSDIRECTORY}/${TOOL_NAME}/${TOOL_VERSION}"
+      if [[ -x "${dest}/${TOOL_BINARY}" ]]; then
+        echo "${TOOL_NAME} ${TOOL_VERSION} already present in the tool cache"
+      else
+        tmp="$(mktemp -d)"
+        trap 'rm -rf "${tmp}"' EXIT
+        curl --fail --silent --show-error --location --retry 3 --output "${tmp}/asset" "${TOOL_URL}"
+        echo "${TOOL_SHA256}  ${tmp}/asset" | sha256sum --check --strict
+        mkdir -p "${dest}"
+        if [[ "${TOOL_ARCHIVE}" == "tar.gz" ]]; then
+          tar -xzf "${tmp}/asset" -C "${dest}" "${TOOL_BINARY}"
+        else
+          install -m 0755 "${tmp}/asset" "${dest}/${TOOL_BINARY}"
+        fi
+      fi
+      echo "##vso[task.prependpath]${dest}"
+    displayName: Install ${{ parameters.name }} ${{ parameters.version }} (sha256 verified)
+    env:
+      TOOL_NAME: ${{ parameters.name }}
+      TOOL_VERSION: ${{ parameters.version }}
+      TOOL_URL: ${{ parameters.url }}
+      TOOL_SHA256: ${{ parameters.sha256 }}
+      TOOL_ARCHIVE: ${{ parameters.archive }}
+      TOOL_BINARY: ${{ parameters.binary }}

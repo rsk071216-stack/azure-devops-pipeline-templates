@@ -1,0 +1,107 @@
+# Stages: multi-environment promotion of one immutable image to AKS.
+#
+# Each entry in `environments` becomes one deployment stage. Promotion order is
+# declared explicitly with `promoteFrom`, which also allows fan-out
+# (e.g. prod-weu and prod-neu both promoted from test):
+#
+#   environments:
+#     - { name: dev,  serviceConnection: sc-shop-dev,  resourceGroup: rg-shop-dev,  cluster: aks-shop-dev }
+#     - { name: test, serviceConnection: sc-shop-test, resourceGroup: rg-shop-test, cluster: aks-shop-test, promoteFrom: dev }
+#     - { name: prod, serviceConnection: sc-shop-prod, resourceGroup: rg-shop-prod, cluster: aks-shop-prod, promoteFrom: test,
+#         smokeTestUrl: https://shop.example.com/healthz }
+#
+# Optional per-environment keys: namespace, environment (Azure DevOps
+# environment name, default <appName>-<name>), smokeTestUrl, promoteFrom.
+# Gates (approvals, business hours, exclusive lock, Required template) live on
+# the Azure DevOps environments - see platform/azure-devops-governance.
+
+parameters:
+  - name: appName
+    displayName: Application name (default namespace, release name and environment prefix)
+    type: string
+  - name: environments
+    displayName: Ordered list of environment objects (see header)
+    type: object
+  - name: method
+    displayName: Deployment tool
+    type: string
+    default: helm
+    values:
+      - helm
+      - kustomize
+  - name: helmChartPath
+    displayName: Helm chart path (helm)
+    type: string
+    default: deploy/helm
+  - name: helmValuesDirectory
+    displayName: Directory with values-<env>.yaml files; empty to use chart defaults only (helm)
+    type: string
+    default: ''
+  - name: kustomizeOverlayRoot
+    displayName: Directory containing one overlay per environment name (kustomize)
+    type: string
+    default: deploy/overlays
+  - name: kustomizeImageName
+    displayName: Image name used in the manifests (kustomize)
+    type: string
+    default: app
+  - name: rolloutResources
+    displayName: Workloads awaited and rolled back (kustomize)
+    type: object
+    default: []
+  - name: buildStageName
+    displayName: Stage that produced the image (container-ci stageName)
+    type: string
+    default: Build
+  - name: deployBranch
+    displayName: Only this branch may deploy; pull requests never deploy
+    type: string
+    default: refs/heads/main
+  - name: dependsOn
+    displayName: Extra dependencies for the entry stages (the governance template adds SecurityBaseline)
+    type: object
+    default: []
+  - name: pool
+    displayName: Agent pool
+    type: object
+    default:
+      vmImage: ubuntu-24.04
+
+stages:
+  - ${{ each env in parameters.environments }}:
+      - stage: Deploy_${{ replace(env.name, '-', '_') }}
+        displayName: Deploy ${{ env.name }}
+        lockBehavior: sequential
+        ${{ if env.promoteFrom }}:
+          dependsOn:
+            - ${{ parameters.buildStageName }}
+            - Deploy_${{ replace(env.promoteFrom, '-', '_') }}
+        ${{ else }}:
+          dependsOn:
+            - ${{ parameters.buildStageName }}
+            - ${{ each dep in parameters.dependsOn }}:
+                - ${{ dep }}
+        condition: and(succeeded(), ne(variables['Build.Reason'], 'PullRequest'), eq(variables['Build.SourceBranch'], '${{ parameters.deployBranch }}'))
+        jobs:
+          - template: ../jobs/aks-deploy.yml
+            parameters:
+              environmentName: ${{ env.name }}
+              environment: ${{ coalesce(env.environment, format('{0}-{1}', parameters.appName, env.name)) }}
+              azureServiceConnection: ${{ env.serviceConnection }}
+              resourceGroup: ${{ env.resourceGroup }}
+              clusterName: ${{ env.cluster }}
+              namespace: ${{ coalesce(env.namespace, parameters.appName) }}
+              method: ${{ parameters.method }}
+              helmChartPath: ${{ parameters.helmChartPath }}
+              helmReleaseName: ${{ parameters.appName }}
+              ${{ if ne(parameters.helmValuesDirectory, '') }}:
+                helmValuesFiles:
+                  - ${{ parameters.helmValuesDirectory }}/values-${{ env.name }}.yaml
+              kustomizeOverlayPath: ${{ parameters.kustomizeOverlayRoot }}/${{ env.name }}
+              kustomizeImageName: ${{ parameters.kustomizeImageName }}
+              rolloutResources: ${{ parameters.rolloutResources }}
+              ${{ if env.smokeTestUrl }}:
+                smokeTestUrl: ${{ env.smokeTestUrl }}
+              pool: ${{ parameters.pool }}
+              variables:
+                imageRef: $[ stageDependencies.${{ parameters.buildStageName }}.ContainerBuild.outputs['push.imageRef'] ]

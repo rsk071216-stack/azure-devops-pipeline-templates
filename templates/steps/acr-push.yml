@@ -1,0 +1,40 @@
+# Pushes a scanned image to Azure Container Registry using a Workload Identity
+# Federation service connection (no admin user, no registry password) and
+# exports the immutable digest reference as an output variable:
+#   stageDependencies.<stage>.<job>.outputs['push.imageRef']
+
+parameters:
+  - name: azureServiceConnection
+    displayName: Azure Resource Manager service connection (Workload Identity Federation) with AcrPush on the registry
+    type: string
+  - name: acrName
+    displayName: Azure Container Registry name (without .azurecr.io)
+    type: string
+  - name: imageRef
+    displayName: Local image reference to push
+    type: string
+  - name: condition
+    displayName: Step condition, e.g. to skip pushes for pull requests
+    type: string
+    default: succeeded()
+
+steps:
+  - task: AzureCLI@2
+    name: push
+    displayName: Push image to ${{ parameters.acrName }} (OIDC, no secrets)
+    condition: ${{ parameters.condition }}
+    inputs:
+      azureSubscription: ${{ parameters.azureServiceConnection }}
+      scriptType: bash
+      scriptLocation: inlineScript
+      inlineScript: |
+        set -euo pipefail
+        az acr login --name "${ACR_NAME}" --only-show-errors
+        docker push "${IMAGE_REF}"
+        digest_ref="$(docker image inspect --format '{{ index .RepoDigests 0 }}' "${IMAGE_REF}")"
+        echo "Pushed ${digest_ref}"
+        echo "##vso[task.setvariable variable=imageRef;isOutput=true]${digest_ref}"
+        echo "##vso[build.addbuildtag]image-pushed"
+    env:
+      ACR_NAME: ${{ parameters.acrName }}
+      IMAGE_REF: ${{ parameters.imageRef }}

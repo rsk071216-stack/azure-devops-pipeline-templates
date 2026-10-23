@@ -1,0 +1,113 @@
+# Job: Node.js install (cached), lint/test via an npm script, JUnit and
+# Cobertura publishing, and a coverage gate.
+# The npm script is expected to emit JUnit XML and a Cobertura report
+# (e.g. jest with jest-junit + coverageReporters: ["cobertura"], or
+# vitest --reporter=junit --coverage.reporter=cobertura).
+
+parameters:
+  - name: name
+    displayName: Job identifier
+    type: string
+    default: NodeTest
+  - name: nodeVersion
+    displayName: Node.js version spec
+    type: string
+    default: 24.x
+  - name: workingDirectory
+    displayName: Directory containing package.json and package-lock.json
+    type: string
+    default: .
+  - name: testScript
+    displayName: npm script that runs the tests with coverage
+    type: string
+    default: test:ci
+  - name: testResultsFiles
+    displayName: Glob of JUnit result files, relative to workingDirectory
+    type: string
+    default: junit.xml
+  - name: coverageDirectory
+    displayName: Directory of the Cobertura report, relative to workingDirectory
+    type: string
+    default: coverage
+  - name: coverageFileName
+    displayName: Cobertura report file name
+    type: string
+    default: cobertura-coverage.xml
+  - name: minimumLineCoverage
+    displayName: Minimum line coverage in percent (0 disables the gate)
+    type: number
+    default: 80
+  - name: pool
+    displayName: Agent pool
+    type: object
+    default:
+      vmImage: ubuntu-24.04
+  - name: dependsOn
+    displayName: Jobs this job depends on
+    type: object
+    default: []
+  - name: timeoutInMinutes
+    displayName: Job timeout
+    type: number
+    default: 30
+
+jobs:
+  - job: ${{ parameters.name }}
+    displayName: Node.js tests + coverage
+    pool: ${{ parameters.pool }}
+    dependsOn: ${{ parameters.dependsOn }}
+    timeoutInMinutes: ${{ parameters.timeoutInMinutes }}
+    variables:
+      npm_config_cache: $(Pipeline.Workspace)/.npm
+    steps:
+      - checkout: self
+        fetchDepth: 1
+        persistCredentials: false
+
+      - task: NodeTool@0
+        displayName: Install Node.js ${{ parameters.nodeVersion }}
+        inputs:
+          versionSource: spec
+          versionSpec: ${{ parameters.nodeVersion }}
+
+      - task: Cache@2
+        displayName: Cache npm
+        inputs:
+          key: npm | "$(Agent.OS)" | ${{ parameters.workingDirectory }}/package-lock.json
+          restoreKeys: |
+            npm | "$(Agent.OS)"
+          path: $(npm_config_cache)
+
+      - bash: |
+          set -euo pipefail
+          npm ci --no-audit --no-fund
+          npm run "${TEST_SCRIPT}"
+        displayName: npm ci && npm run ${{ parameters.testScript }}
+        workingDirectory: ${{ parameters.workingDirectory }}
+        env:
+          TEST_SCRIPT: ${{ parameters.testScript }}
+          CI: 'true'
+
+      - task: PublishTestResults@2
+        displayName: Publish test results
+        condition: succeededOrFailed()
+        inputs:
+          testResultsFormat: JUnit
+          testResultsFiles: ${{ parameters.testResultsFiles }}
+          searchFolder: $(System.DefaultWorkingDirectory)/${{ parameters.workingDirectory }}
+          failTaskOnMissingResultsFile: true
+          testRunTitle: $(Build.DefinitionName) - unit tests
+
+      - task: PublishCodeCoverageResults@2
+        displayName: Publish code coverage
+        condition: succeededOrFailed()
+        inputs:
+          summaryFileLocation: $(System.DefaultWorkingDirectory)/${{ parameters.workingDirectory }}/${{ parameters.coverageDirectory }}/${{ parameters.coverageFileName }}
+          failIfCoverageEmpty: true
+
+      - ${{ if gt(parameters.minimumLineCoverage, 0) }}:
+          - template: ../steps/coverage-gate.yml
+            parameters:
+              searchDirectory: $(System.DefaultWorkingDirectory)/${{ parameters.workingDirectory }}/${{ parameters.coverageDirectory }}
+              fileName: ${{ parameters.coverageFileName }}
+              minimumLineCoverage: ${{ parameters.minimumLineCoverage }}

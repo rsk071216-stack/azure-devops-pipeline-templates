@@ -1,0 +1,127 @@
+# Stages: Terraform plan/apply promotion across environments.
+#
+# Per environment two stages are generated:
+#   Plan_<env>   plan-only identity, runs on every build including pull requests
+#   Apply_<env>  deployment job on the <prefix>-<env> environment; runs only when
+#                the plan has changes, on the deploy branch, after approval
+#
+# Splitting plan and apply into separate stages is deliberate: environment
+# checks are evaluated when a stage starts, so approvers review the published
+# plan (Terraform Plan tab + run summary) before they approve the apply.
+#
+#   environments:
+#     - { name: dev,  serviceConnection: sc-infra-dev }
+#     - { name: test, serviceConnection: sc-infra-test, promoteFrom: dev }
+#     - { name: prod, serviceConnection: sc-infra-prod, promoteFrom: test, planServiceConnection: sc-infra-prod-plan }
+#
+# Optional per-environment keys: planServiceConnection (Reader identity for the
+# plan, defaults to serviceConnection), environment (Azure DevOps environment
+# name, default <environmentPrefix>-<name>), varFile (default
+# <varFileDirectory>/<name>.tfvars when varFileDirectory is set), promoteFrom.
+
+parameters:
+  - name: environmentPrefix
+    displayName: Prefix for Azure DevOps environment names and state keys, e.g. shop-infra
+    type: string
+  - name: environments
+    displayName: Ordered list of environment objects (see header)
+    type: object
+  - name: workingDirectory
+    displayName: Terraform root module directory
+    type: string
+  - name: varFileDirectory
+    displayName: Directory with <env>.tfvars files, relative to workingDirectory; empty for none
+    type: string
+    default: ''
+  - name: terraformVersion
+    displayName: Terraform CLI version
+    type: string
+    default: 1.16.5
+  - name: backendResourceGroup
+    displayName: Resource group of the state storage account
+    type: string
+  - name: backendStorageAccount
+    displayName: State storage account name
+    type: string
+  - name: backendContainer
+    displayName: Blob container holding the state files
+    type: string
+    default: tfstate
+  - name: iacScan
+    displayName: Trivy misconfiguration scan before every plan
+    type: boolean
+    default: true
+  - name: deployBranch
+    displayName: Only this branch may apply; pull requests only plan
+    type: string
+    default: refs/heads/main
+  - name: dependsOn
+    displayName: Extra dependencies for the entry stages (the governance template adds SecurityBaseline)
+    type: object
+    default: []
+  - name: pool
+    displayName: Agent pool
+    type: object
+    default:
+      vmImage: ubuntu-24.04
+
+stages:
+  - ${{ each env in parameters.environments }}:
+      - stage: Plan_${{ replace(env.name, '-', '_') }}
+        displayName: Plan ${{ env.name }}
+        ${{ if env.promoteFrom }}:
+          dependsOn:
+            - Plan_${{ replace(env.promoteFrom, '-', '_') }}
+            - Apply_${{ replace(env.promoteFrom, '-', '_') }}
+          # Continue when the previous environment applied successfully or had
+          # nothing to apply (skipped), but never after a failed or skipped plan.
+          condition: >-
+            and(not(canceled()),
+                eq(dependencies.Plan_${{ replace(env.promoteFrom, '-', '_') }}.result, 'Succeeded'),
+                in(dependencies.Apply_${{ replace(env.promoteFrom, '-', '_') }}.result, 'Succeeded', 'Skipped'))
+        ${{ elseif gt(length(parameters.dependsOn), 0) }}:
+          dependsOn: ${{ parameters.dependsOn }}
+        jobs:
+          - template: ../jobs/terraform-plan.yml
+            parameters:
+              name: Plan
+              environmentName: ${{ env.name }}
+              azureServiceConnection: ${{ coalesce(env.planServiceConnection, env.serviceConnection) }}
+              backendServiceConnection: ${{ coalesce(env.planServiceConnection, env.serviceConnection) }}
+              workingDirectory: ${{ parameters.workingDirectory }}
+              terraformVersion: ${{ parameters.terraformVersion }}
+              backendResourceGroup: ${{ parameters.backendResourceGroup }}
+              backendStorageAccount: ${{ parameters.backendStorageAccount }}
+              backendContainer: ${{ parameters.backendContainer }}
+              backendKey: ${{ parameters.environmentPrefix }}/${{ env.name }}.tfstate
+              ${{ if env.varFile }}:
+                varFile: ${{ env.varFile }}
+              ${{ elseif ne(parameters.varFileDirectory, '') }}:
+                varFile: ${{ parameters.varFileDirectory }}/${{ env.name }}.tfvars
+              iacScan: ${{ parameters.iacScan }}
+              pool: ${{ parameters.pool }}
+
+      - stage: Apply_${{ replace(env.name, '-', '_') }}
+        displayName: Apply ${{ env.name }}
+        dependsOn:
+          - Plan_${{ replace(env.name, '-', '_') }}
+        lockBehavior: sequential
+        condition: >-
+          and(succeeded(),
+              eq(dependencies.Plan_${{ replace(env.name, '-', '_') }}.outputs['Plan.plan.changesPresent'], 'true'),
+              ne(variables['Build.Reason'], 'PullRequest'),
+              eq(variables['Build.SourceBranch'], '${{ parameters.deployBranch }}'))
+        jobs:
+          - template: ../jobs/terraform-apply.yml
+            parameters:
+              name: Apply
+              environmentName: ${{ env.name }}
+              environment: ${{ coalesce(env.environment, format('{0}-{1}', parameters.environmentPrefix, env.name)) }}
+              azureServiceConnection: ${{ env.serviceConnection }}
+              workingDirectory: ${{ parameters.workingDirectory }}
+              terraformVersion: ${{ parameters.terraformVersion }}
+              backendResourceGroup: ${{ parameters.backendResourceGroup }}
+              backendStorageAccount: ${{ parameters.backendStorageAccount }}
+              backendContainer: ${{ parameters.backendContainer }}
+              backendKey: ${{ parameters.environmentPrefix }}/${{ env.name }}.tfstate
+              pool: ${{ parameters.pool }}

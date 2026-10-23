@@ -1,0 +1,77 @@
+# Deploys a Kustomize overlay to AKS with server-side apply. The image is pinned
+# by digest through a generated wrapper kustomization, so the overlay in the
+# application repository never has to be edited by the pipeline.
+# Rollout status is awaited for every listed workload; the deployment job's
+# on.failure hook uses the same list to run `kubectl rollout undo`.
+
+parameters:
+  - name: azureServiceConnection
+    displayName: Azure Resource Manager service connection (Workload Identity Federation)
+    type: string
+  - name: resourceGroup
+    displayName: Resource group of the AKS cluster
+    type: string
+  - name: clusterName
+    displayName: AKS cluster name
+    type: string
+  - name: namespace
+    displayName: Target Kubernetes namespace
+    type: string
+  - name: overlayPath
+    displayName: Path to the Kustomize overlay for this environment
+    type: string
+  - name: imageName
+    displayName: Image name as written in the manifests (the value that gets replaced)
+    type: string
+  - name: imageRef
+    displayName: Image reference in repository@sha256:digest form
+    type: string
+  - name: rolloutResources
+    displayName: Workloads to wait for, e.g. [deployment/web, statefulset/worker]
+    type: object
+    default: []
+  - name: timeout
+    displayName: Rollout timeout (Go duration)
+    type: string
+    default: 10m
+
+steps:
+  - template: aks-script.yml
+    parameters:
+      azureServiceConnection: ${{ parameters.azureServiceConnection }}
+      resourceGroup: ${{ parameters.resourceGroup }}
+      clusterName: ${{ parameters.clusterName }}
+      displayName: kubectl apply -k ${{ parameters.overlayPath }} (${{ parameters.namespace }})
+      env:
+        K8S_NAMESPACE: ${{ parameters.namespace }}
+        OVERLAY_PATH: ${{ parameters.overlayPath }}
+        IMAGE_NAME: ${{ parameters.imageName }}
+        IMAGE_REF: ${{ parameters.imageRef }}
+        ROLLOUT_RESOURCES: ${{ join(';', parameters.rolloutResources) }}
+        ROLLOUT_TIMEOUT: ${{ parameters.timeout }}
+      script: |
+        if [[ "${IMAGE_REF}" != *@sha256:* ]]; then
+          echo "##vso[task.logissue type=error]imageRef '${IMAGE_REF}' is not digest-pinned; deployments must use repository@sha256:digest"
+          exit 1
+        fi
+        wrapper="$(mktemp -d)"
+        overlay_abs="$(realpath "${OVERLAY_PATH}")"
+        cat > "${wrapper}/kustomization.yaml" <<EOF
+        apiVersion: kustomize.config.k8s.io/v1beta1
+        kind: Kustomization
+        namespace: ${K8S_NAMESPACE}
+        resources:
+          - $(realpath --relative-to="${wrapper}" "${overlay_abs}")
+        images:
+          - name: ${IMAGE_NAME}
+            newName: ${IMAGE_REF%@*}
+            digest: ${IMAGE_REF#*@}
+        EOF
+        kubectl kustomize "${wrapper}" > "${wrapper}/rendered.yaml"
+        kubectl apply --server-side --field-manager=azure-pipelines --namespace "${K8S_NAMESPACE}" --filename "${wrapper}/rendered.yaml"
+        if [[ -n "${ROLLOUT_RESOURCES}" ]]; then
+          IFS=';' read -r -a resources <<< "${ROLLOUT_RESOURCES}"
+          for r in "${resources[@]}"; do
+            kubectl rollout status "${r}" --namespace "${K8S_NAMESPACE}" --timeout "${ROLLOUT_TIMEOUT}"
+          done
+        fi

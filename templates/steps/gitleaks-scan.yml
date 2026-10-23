@@ -1,0 +1,73 @@
+# Secret scanning with gitleaks. Findings are redacted in logs and published as
+# a SARIF report so they show up in the "Scans" tab (SARIF SAST Scans Tab
+# extension) and can be ingested by Defender for DevOps.
+
+parameters:
+  - name: scanMode
+    displayName: git scans the full commit history, dir scans only the working tree
+    type: string
+    default: git
+    values:
+      - git
+      - dir
+  - name: sourcePath
+    displayName: Path to scan
+    type: string
+    default: $(Build.SourcesDirectory)
+  - name: configPath
+    displayName: Optional gitleaks config file (an in-repo .gitleaks.toml is picked up automatically)
+    type: string
+    default: ''
+  - name: failOnFindings
+    displayName: Fail the step when a secret is detected
+    type: boolean
+    default: true
+  - name: artifactName
+    displayName: Pipeline artifact name for the SARIF report
+    type: string
+    default: security-gitleaks
+  - name: version
+    displayName: gitleaks version
+    type: string
+    default: 8.30.1
+  - name: sha256
+    displayName: SHA-256 of the linux_x64 release archive for the chosen version
+    type: string
+    default: 551f6fc83ea457d62a0d98237cbad105af8d557003051f41f3e7ca7b3f2470eb
+
+steps:
+  - template: install-tool.yml
+    parameters:
+      name: gitleaks
+      version: ${{ parameters.version }}
+      url: https://github.com/gitleaks/gitleaks/releases/download/v${{ parameters.version }}/gitleaks_${{ parameters.version }}_linux_x64.tar.gz
+      sha256: ${{ parameters.sha256 }}
+      binary: gitleaks
+
+  - bash: |
+      set -euo pipefail
+      report_dir="$(Build.ArtifactStagingDirectory)/gitleaks"
+      mkdir -p "${report_dir}"
+      args=(--no-banner --redact --report-format sarif --report-path "${report_dir}/gitleaks.sarif")
+      if [[ -n "${GITLEAKS_CONFIG}" ]]; then
+        args+=(--config "${GITLEAKS_CONFIG}")
+      fi
+      if [[ "${FAIL_ON_FINDINGS,,}" == "true" ]]; then
+        args+=(--exit-code 1)
+      else
+        args+=(--exit-code 0)
+      fi
+      gitleaks "${SCAN_MODE}" "${args[@]}" "${SOURCE_PATH}"
+    displayName: gitleaks ${{ parameters.scanMode }} scan
+    env:
+      SCAN_MODE: ${{ parameters.scanMode }}
+      SOURCE_PATH: ${{ parameters.sourcePath }}
+      GITLEAKS_CONFIG: ${{ parameters.configPath }}
+      FAIL_ON_FINDINGS: ${{ parameters.failOnFindings }}
+
+  - task: PublishPipelineArtifact@1
+    displayName: Publish gitleaks report
+    condition: succeededOrFailed()
+    inputs:
+      targetPath: $(Build.ArtifactStagingDirectory)/gitleaks
+      artifact: ${{ parameters.artifactName }}-$(System.JobAttempt)

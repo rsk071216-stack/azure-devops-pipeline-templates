@@ -1,0 +1,29 @@
+# Post-deployment smoke test. A failing probe fails the deployment job, which
+# triggers the strategy's on.failure hook and therefore the automatic rollback.
+
+parameters:
+  - name: url
+    displayName: HTTPS endpoint that must return a 2xx status
+    type: string
+  - name: attempts
+    displayName: Number of attempts before the test fails
+    type: number
+    default: 10
+  - name: delaySeconds
+    displayName: Delay between attempts
+    type: number
+    default: 6
+
+steps:
+  - bash: |
+      set -euo pipefail
+      curl --fail --silent --show-error --location \
+        --retry "${ATTEMPTS}" --retry-delay "${DELAY}" --retry-all-errors \
+        --max-time 10 --output /dev/null \
+        --write-out 'HTTP %{http_code} in %{time_total}s\n' \
+        "${SMOKE_URL}"
+    displayName: Smoke test ${{ parameters.url }}
+    env:
+      SMOKE_URL: ${{ parameters.url }}
+      ATTEMPTS: ${{ parameters.attempts }}
+      DELAY: ${{ parameters.delaySeconds }}

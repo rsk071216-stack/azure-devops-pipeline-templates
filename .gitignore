@@ -1,0 +1,23 @@
+# Terraform
+.terraform/
+*.tfstate
+*.tfstate.*
+*.tfplan
+tfplan
+crash.log
+terraform.tfvars
+*.auto.tfvars
+override.tf
+override.tf.json
+
+# Local tooling
+.vscode/
+.idea/
+*.swp
+.DS_Store
+Thumbs.db
+
+# Never commit credentials
+*.pem
+*.pfx
+.env

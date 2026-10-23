@@ -1,0 +1,106 @@
+# Job: build -> scan -> SBOM -> push.
+# The image only reaches ACR after it has passed the Trivy gate. The pushed
+# digest is exported as stageDependencies.<stage>.<job>.outputs['push.imageRef']
+# so that every environment deploys exactly the same bytes ("build once,
+# promote everywhere").
+
+parameters:
+  - name: name
+    displayName: Job identifier
+    type: string
+    default: ContainerBuild
+  - name: azureServiceConnection
+    displayName: ARM service connection (Workload Identity Federation) with AcrPush on the registry
+    type: string
+  - name: acrName
+    displayName: Azure Container Registry name (without .azurecr.io)
+    type: string
+  - name: repository
+    displayName: Image repository inside the registry, e.g. shop/web
+    type: string
+  - name: imageTag
+    displayName: Image tag (the digest is what gets deployed; the tag is for humans)
+    type: string
+    default: $(Build.BuildId)
+  - name: dockerfile
+    displayName: Path to the Dockerfile
+    type: string
+    default: Dockerfile
+  - name: buildContext
+    displayName: Docker build context
+    type: string
+    default: .
+  - name: buildArgs
+    displayName: List of KEY=VALUE build arguments
+    type: object
+    default: []
+  - name: trivySeverity
+    displayName: Severities that block the push
+    type: string
+    default: HIGH,CRITICAL
+    values:
+      - CRITICAL
+      - HIGH,CRITICAL
+      - MEDIUM,HIGH,CRITICAL
+  - name: pushPolicy
+    displayName: When the image is pushed to ACR
+    type: string
+    default: nonPullRequest
+    values:
+      - always
+      - nonPullRequest
+      - never
+  - name: pool
+    displayName: Agent pool
+    type: object
+    default:
+      vmImage: ubuntu-24.04
+  - name: dependsOn
+    displayName: Jobs this job depends on
+    type: object
+    default: []
+  - name: timeoutInMinutes
+    displayName: Job timeout
+    type: number
+    default: 30
+
+jobs:
+  - job: ${{ parameters.name }}
+    displayName: Container build, scan and push
+    pool: ${{ parameters.pool }}
+    dependsOn: ${{ parameters.dependsOn }}
+    timeoutInMinutes: ${{ parameters.timeoutInMinutes }}
+    variables:
+      localImage: ${{ parameters.acrName }}.azurecr.io/${{ parameters.repository }}:${{ parameters.imageTag }}
+    steps:
+      - checkout: self
+        fetchDepth: 1
+        persistCredentials: false
+
+      - template: ../steps/docker-build.yml
+        parameters:
+          imageRef: $(localImage)
+          dockerfile: ${{ parameters.dockerfile }}
+          buildContext: ${{ parameters.buildContext }}
+          buildArgs: ${{ parameters.buildArgs }}
+
+      - template: ../steps/trivy-scan.yml
+        parameters:
+          scanType: image
+          target: $(localImage)
+          severity: ${{ parameters.trivySeverity }}
+          artifactName: security-trivy-image
+
+      - template: ../steps/syft-sbom.yml
+        parameters:
+          source: docker:$(localImage)
+          artifactName: sbom-image
+
+      - ${{ if ne(parameters.pushPolicy, 'never') }}:
+          - template: ../steps/acr-push.yml
+            parameters:
+              azureServiceConnection: ${{ parameters.azureServiceConnection }}
+              acrName: ${{ parameters.acrName }}
+              imageRef: $(localImage)
+              ${{ if eq(parameters.pushPolicy, 'nonPullRequest') }}:
+                condition: and(succeeded(), ne(variables['Build.Reason'], 'PullRequest'))

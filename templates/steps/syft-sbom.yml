@@ -1,0 +1,48 @@
+# Generates a Software Bill of Materials with syft in both SPDX and CycloneDX
+# JSON formats and publishes it as a pipeline artifact, giving every build an
+# auditable inventory of what was shipped.
+
+parameters:
+  - name: source
+    displayName: syft source with scheme, e.g. dir:$(Build.SourcesDirectory) or docker:myacr.azurecr.io/app:1.2.3
+    type: string
+  - name: artifactName
+    displayName: Pipeline artifact name for the SBOM files
+    type: string
+    default: sbom
+  - name: version
+    displayName: syft version
+    type: string
+    default: 1.54.1
+  - name: sha256
+    displayName: SHA-256 of the linux_amd64 release archive for the chosen version
+    type: string
+    default: c069905b391cc4c20a5ba65ad5c10be2a7ba074f8ea6ad203e24d14e303dad47
+
+steps:
+  - template: install-tool.yml
+    parameters:
+      name: syft
+      version: ${{ parameters.version }}
+      url: https://github.com/anchore/syft/releases/download/v${{ parameters.version }}/syft_${{ parameters.version }}_linux_amd64.tar.gz
+      sha256: ${{ parameters.sha256 }}
+      binary: syft
+
+  - bash: |
+      set -euo pipefail
+      out="$(Build.ArtifactStagingDirectory)/sbom"
+      mkdir -p "${out}"
+      syft scan "${SBOM_SOURCE}" \
+        --output "spdx-json=${out}/sbom.spdx.json" \
+        --output "cyclonedx-json=${out}/sbom.cdx.json"
+      echo "SBOM packages: $(grep -o '"SPDXID"' "${out}/sbom.spdx.json" | wc -l)"
+    displayName: Generate SBOM (SPDX + CycloneDX)
+    env:
+      SBOM_SOURCE: ${{ parameters.source }}
+      SYFT_CHECK_FOR_APP_UPDATE: 'false'
+
+  - task: PublishPipelineArtifact@1
+    displayName: Publish SBOM
+    inputs:
+      targetPath: $(Build.ArtifactStagingDirectory)/sbom
+      artifact: ${{ parameters.artifactName }}-$(System.JobAttempt)

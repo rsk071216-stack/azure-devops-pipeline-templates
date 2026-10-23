@@ -1,0 +1,35 @@
+# Installs pinned kubectl, kubelogin and Helm versions so that deployments are
+# reproducible regardless of what the hosted image ships this week.
+
+parameters:
+  - name: kubectlVersion
+    displayName: kubectl version (keep within one minor version of the cluster)
+    type: string
+    default: 1.36.4
+  - name: kubeloginVersion
+    displayName: kubelogin version (required for Entra ID enabled AKS clusters)
+    type: string
+    default: 0.2.20
+  - name: helmVersion
+    displayName: Helm version
+    type: string
+    default: v4.3.0
+  - name: installHelm
+    displayName: Install Helm (not needed for Kustomize deployments)
+    type: boolean
+    default: true
+
+steps:
+  - task: KubectlInstaller@0
+    displayName: Install kubectl ${{ parameters.kubectlVersion }}
+    inputs:
+      kubectlVersion: ${{ parameters.kubectlVersion }}
+  - task: KubeloginInstaller@0
+    displayName: Install kubelogin ${{ parameters.kubeloginVersion }}
+    inputs:
+      kubeloginVersion: ${{ parameters.kubeloginVersion }}
+  - ${{ if parameters.installHelm }}:
+      - task: HelmInstaller@1
+        displayName: Install Helm ${{ parameters.helmVersion }}
+        inputs:
+          helmVersionToInstall: ${{ parameters.helmVersion }}

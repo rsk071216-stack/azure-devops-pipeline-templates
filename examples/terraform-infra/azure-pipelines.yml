@@ -1,0 +1,35 @@
+# Terraform infrastructure: plan every environment on pull requests, apply
+# dev -> test -> prod on main after approval of the published plan.
+
+trigger:
+  branches:
+    include: [main]
+  paths:
+    include: [infra]
+pr:
+  branches:
+    include: [main]
+
+resources:
+  repositories:
+    - repository: templates
+      type: github
+      name: rsk071216-stack/azure-devops-pipeline-templates
+      ref: refs/tags/v1.0.0
+      endpoint: github-platform-templates
+
+extends:
+  template: templates/governance/secure-pipeline.yml@templates
+  parameters:
+    stages:
+      - template: templates/stages/terraform-promotion.yml@templates
+        parameters:
+          environmentPrefix: shop-infra
+          workingDirectory: infra
+          varFileDirectory: environments
+          backendResourceGroup: rg-tfstate
+          backendStorageAccount: sttfstateshop001
+          environments:
+            - { name: dev, serviceConnection: sc-infra-dev }
+            - { name: test, serviceConnection: sc-infra-test, promoteFrom: dev }
+            - { name: prod, serviceConnection: sc-infra-prod, planServiceConnection: sc-infra-prod-plan, promoteFrom: test }

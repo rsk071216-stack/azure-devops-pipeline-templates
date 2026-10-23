@@ -1,0 +1,38 @@
+---
+# yamllint configuration tuned for Azure Pipelines templates:
+#  - template expressions such as ${{ if ... }}: are valid YAML keys and are
+#    left alone by every rule below
+#  - flow mappings are allowed for compact environment lists
+#  - GitHub Actions uses the `on:` key, so truthy keys are not checked
+
+extends: default
+
+ignore: |
+  .terraform/
+
+rules:
+  document-start: disable
+  line-length:
+    max: 200
+    allow-non-breakable-words: true
+    allow-non-breakable-inline-mappings: true
+  truthy:
+    allowed-values: ["true", "false"]
+    check-keys: false
+  comments:
+    min-spaces-from-content: 1
+  comments-indentation: disable
+  indentation:
+    spaces: 2
+    indent-sequences: consistent
+  braces:
+    min-spaces-inside: 0
+    max-spaces-inside: 1
+  brackets:
+    min-spaces-inside: 0
+    max-spaces-inside: 0
+  empty-lines:
+    max: 2
+  key-duplicates: enable
+  new-line-at-end-of-file: enable
+  trailing-spaces: enable

@@ -1,0 +1,170 @@
+# Deployment job: deploy a digest-pinned image to AKS with Helm or Kustomize.
+#
+# Lifecycle (runOnce strategy):
+#   deploy            -> helm upgrade --rollback-on-failure  |  kubectl apply -k + rollout status
+#   postRouteTraffic  -> optional HTTP smoke test
+#   on.failure        -> automatic rollback (only if this run's digest is live)
+#   on.success        -> tag the run with the environment it reached
+#
+# The Azure DevOps environment carries approvals, business hours, exclusive
+# lock and Required template checks; they are evaluated before this job starts.
+
+parameters:
+  - name: name
+    displayName: Job identifier
+    type: string
+    default: Deploy
+  - name: environmentName
+    displayName: Logical environment name (dev, test, prod...)
+    type: string
+  - name: environment
+    displayName: Azure DevOps environment that carries the approvals and checks
+    type: string
+  - name: azureServiceConnection
+    displayName: ARM service connection (Workload Identity Federation) with AKS RBAC on the namespace
+    type: string
+  - name: resourceGroup
+    displayName: Resource group of the AKS cluster
+    type: string
+  - name: clusterName
+    displayName: AKS cluster name
+    type: string
+  - name: namespace
+    displayName: Target Kubernetes namespace
+    type: string
+  - name: imageRef
+    displayName: Image to deploy in repository@sha256:digest form (usually a runtime variable)
+    type: string
+    default: $(imageRef)
+  - name: method
+    displayName: Deployment tool
+    type: string
+    default: helm
+    values:
+      - helm
+      - kustomize
+  - name: helmChartPath
+    displayName: Helm chart path (helm)
+    type: string
+    default: deploy/helm
+  - name: helmReleaseName
+    displayName: Helm release name (helm)
+    type: string
+    default: ''
+  - name: helmValuesFiles
+    displayName: Ordered values files (helm)
+    type: object
+    default: []
+  - name: helmSetValues
+    displayName: Extra non-secret values (helm)
+    type: object
+    default: {}
+  - name: helmImageDigestKey
+    displayName: Chart value receiving the image digest (helm)
+    type: string
+    default: image.digest
+  - name: kustomizeOverlayPath
+    displayName: Overlay directory (kustomize)
+    type: string
+    default: ''
+  - name: kustomizeImageName
+    displayName: Image name used in the manifests (kustomize)
+    type: string
+    default: app
+  - name: rolloutResources
+    displayName: Workloads awaited and rolled back (kustomize), e.g. [deployment/web]
+    type: object
+    default: []
+  - name: smokeTestUrl
+    displayName: Optional HTTPS endpoint probed after deployment; failure triggers rollback
+    type: string
+    default: ''
+  - name: variables
+    displayName: Job variables, e.g. imageRef mapped from stageDependencies
+    type: object
+    default: {}
+  - name: pool
+    displayName: Agent pool
+    type: object
+    default:
+      vmImage: ubuntu-24.04
+  - name: timeoutInMinutes
+    displayName: Job timeout
+    type: number
+    default: 30
+
+jobs:
+  - deployment: ${{ parameters.name }}
+    displayName: Deploy to ${{ parameters.environmentName }} (${{ parameters.method }})
+    pool: ${{ parameters.pool }}
+    timeoutInMinutes: ${{ parameters.timeoutInMinutes }}
+    environment: ${{ parameters.environment }}
+    variables: ${{ parameters.variables }}
+    strategy:
+      runOnce:
+        deploy:
+          steps:
+            - checkout: self
+              fetchDepth: 1
+              persistCredentials: false
+            - template: ../steps/install-kube-tools.yml
+              parameters:
+                installHelm: ${{ eq(parameters.method, 'helm') }}
+            - ${{ if eq(parameters.method, 'helm') }}:
+                - template: ../steps/helm-deploy.yml
+                  parameters:
+                    azureServiceConnection: ${{ parameters.azureServiceConnection }}
+                    resourceGroup: ${{ parameters.resourceGroup }}
+                    clusterName: ${{ parameters.clusterName }}
+                    namespace: ${{ parameters.namespace }}
+                    releaseName: ${{ coalesce(parameters.helmReleaseName, parameters.namespace) }}
+                    chartPath: ${{ parameters.helmChartPath }}
+                    imageRef: ${{ parameters.imageRef }}
+                    valuesFiles: ${{ parameters.helmValuesFiles }}
+                    setValues: ${{ parameters.helmSetValues }}
+                    imageDigestKey: ${{ parameters.helmImageDigestKey }}
+            - ${{ else }}:
+                - template: ../steps/kustomize-deploy.yml
+                  parameters:
+                    azureServiceConnection: ${{ parameters.azureServiceConnection }}
+                    resourceGroup: ${{ parameters.resourceGroup }}
+                    clusterName: ${{ parameters.clusterName }}
+                    namespace: ${{ parameters.namespace }}
+                    overlayPath: ${{ parameters.kustomizeOverlayPath }}
+                    imageName: ${{ parameters.kustomizeImageName }}
+                    imageRef: ${{ parameters.imageRef }}
+                    rolloutResources: ${{ parameters.rolloutResources }}
+
+        ${{ if ne(parameters.smokeTestUrl, '') }}:
+          postRouteTraffic:
+            steps:
+              - checkout: none
+              - template: ../steps/smoke-test.yml
+                parameters:
+                  url: ${{ parameters.smokeTestUrl }}
+
+        on:
+          failure:
+            steps:
+              - checkout: none
+              - template: ../steps/install-kube-tools.yml
+                parameters:
+                  installHelm: ${{ eq(parameters.method, 'helm') }}
+              - template: ../steps/aks-rollback.yml
+                parameters:
+                  azureServiceConnection: ${{ parameters.azureServiceConnection }}
+                  resourceGroup: ${{ parameters.resourceGroup }}
+                  clusterName: ${{ parameters.clusterName }}
+                  namespace: ${{ parameters.namespace }}
+                  method: ${{ parameters.method }}
+                  imageRef: ${{ parameters.imageRef }}
+                  releaseName: ${{ coalesce(parameters.helmReleaseName, parameters.namespace) }}
+                  imageDigestKey: ${{ parameters.helmImageDigestKey }}
+                  rolloutResources: ${{ parameters.rolloutResources }}
+          success:
+            steps:
+              - checkout: none
+              - bash: echo "##vso[build.addbuildtag]deployed-${ENV_NAME}"
+                displayName: Tag run with environment
+                env:
+                  ENV_NAME: ${{ parameters.environmentName }}

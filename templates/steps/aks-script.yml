@@ -1,0 +1,55 @@
+# Runs a bash script against an AKS cluster. Credentials are obtained through
+# the Workload Identity Federation service connection and converted with
+# kubelogin, so the cluster can have local accounts disabled and rely purely on
+# Entra ID + Kubernetes RBAC. No kubeconfig secret is ever stored.
+
+parameters:
+  - name: azureServiceConnection
+    displayName: Azure Resource Manager service connection (Workload Identity Federation)
+    type: string
+  - name: resourceGroup
+    displayName: Resource group of the AKS cluster
+    type: string
+  - name: clusterName
+    displayName: AKS cluster name
+    type: string
+  - name: script
+    displayName: Bash script executed after cluster credentials are configured
+    type: string
+  - name: displayName
+    displayName: Step display name
+    type: string
+    default: Run script on AKS
+  - name: stepName
+    displayName: Optional step reference name (needed when the script sets output variables)
+    type: string
+    default: ''
+  - name: condition
+    displayName: Step condition
+    type: string
+    default: succeeded()
+  - name: env
+    displayName: Extra environment variables for the script
+    type: object
+    default: {}
+
+steps:
+  - task: AzureCLI@2
+    ${{ if ne(parameters.stepName, '') }}:
+      name: ${{ parameters.stepName }}
+    displayName: ${{ parameters.displayName }}
+    condition: ${{ parameters.condition }}
+    inputs:
+      azureSubscription: ${{ parameters.azureServiceConnection }}
+      scriptType: bash
+      scriptLocation: inlineScript
+      inlineScript: |
+        set -euo pipefail
+        az aks get-credentials --resource-group "${AKS_RESOURCE_GROUP}" --name "${AKS_CLUSTER_NAME}" --overwrite-existing --only-show-errors
+        kubelogin convert-kubeconfig --login azurecli
+        ${{ parameters.script }}
+    env:
+      AKS_RESOURCE_GROUP: ${{ parameters.resourceGroup }}
+      AKS_CLUSTER_NAME: ${{ parameters.clusterName }}
+      ${{ each pair in parameters.env }}:
+        ${{ pair.key }}: ${{ pair.value }}

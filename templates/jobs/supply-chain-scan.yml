@@ -1,0 +1,55 @@
+# Job: source SBOM (syft) plus dependency vulnerability and IaC
+# misconfiguration scan of the repository (Trivy fs).
+
+parameters:
+  - name: name
+    displayName: Job identifier
+    type: string
+    default: SupplyChainScan
+  - name: pool
+    displayName: Agent pool
+    type: object
+    default:
+      vmImage: ubuntu-24.04
+  - name: dependsOn
+    displayName: Jobs this job depends on
+    type: object
+    default: []
+  - name: severity
+    displayName: Trivy severities that fail the job
+    type: string
+    default: HIGH,CRITICAL
+    values:
+      - CRITICAL
+      - HIGH,CRITICAL
+      - MEDIUM,HIGH,CRITICAL
+  - name: failOnFindings
+    displayName: Fail the job on Trivy findings
+    type: boolean
+    default: true
+  - name: timeoutInMinutes
+    displayName: Job timeout
+    type: number
+    default: 20
+
+jobs:
+  - job: ${{ parameters.name }}
+    displayName: SBOM + dependency / IaC scan
+    pool: ${{ parameters.pool }}
+    dependsOn: ${{ parameters.dependsOn }}
+    timeoutInMinutes: ${{ parameters.timeoutInMinutes }}
+    steps:
+      - checkout: self
+        fetchDepth: 1
+        persistCredentials: false
+      - template: ../steps/syft-sbom.yml
+        parameters:
+          source: dir:$(Build.SourcesDirectory)
+          artifactName: sbom-source
+      - template: ../steps/trivy-scan.yml
+        parameters:
+          scanType: fs
+          target: $(Build.SourcesDirectory)
+          severity: ${{ parameters.severity }}
+          failOnFindings: ${{ parameters.failOnFindings }}
+          artifactName: security-trivy-fs

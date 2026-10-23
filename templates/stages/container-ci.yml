@@ -1,0 +1,99 @@
+# Stage: continuous integration for a containerised application.
+#   [ unit tests (.NET | Node | none) ] -> [ build -> Trivy -> SBOM -> push to ACR ]
+# Exposes the pushed digest as
+#   stageDependencies.<stageName>.ContainerBuild.outputs['push.imageRef']
+
+parameters:
+  - name: stageName
+    displayName: Stage identifier (deploy stages reference it)
+    type: string
+    default: Build
+  - name: testStack
+    displayName: Unit test toolchain
+    type: string
+    default: none
+    values:
+      - dotnet
+      - node
+      - none
+  - name: azureServiceConnection
+    displayName: ARM service connection (Workload Identity Federation) with AcrPush
+    type: string
+  - name: acrName
+    displayName: Azure Container Registry name
+    type: string
+  - name: repository
+    displayName: Image repository, e.g. shop/web
+    type: string
+  - name: dockerfile
+    displayName: Path to the Dockerfile
+    type: string
+    default: Dockerfile
+  - name: buildContext
+    displayName: Docker build context
+    type: string
+    default: .
+  - name: buildArgs
+    displayName: List of KEY=VALUE build arguments
+    type: object
+    default: []
+  - name: pushPolicy
+    displayName: When the image is pushed to ACR
+    type: string
+    default: nonPullRequest
+    values:
+      - always
+      - nonPullRequest
+      - never
+  - name: minimumLineCoverage
+    displayName: Coverage gate for the unit test job
+    type: number
+    default: 80
+  - name: testWorkingDirectory
+    displayName: Working directory for Node tests
+    type: string
+    default: .
+  - name: dependsOn
+    displayName: Extra stage dependencies (the governance template adds SecurityBaseline)
+    type: object
+    default: []
+  - name: pool
+    displayName: Agent pool
+    type: object
+    default:
+      vmImage: ubuntu-24.04
+
+stages:
+  - stage: ${{ parameters.stageName }}
+    displayName: Build and verify
+    ${{ if gt(length(parameters.dependsOn), 0) }}:
+      dependsOn: ${{ parameters.dependsOn }}
+    jobs:
+      - ${{ if eq(parameters.testStack, 'dotnet') }}:
+          - template: ../jobs/dotnet-test.yml
+            parameters:
+              name: UnitTests
+              pool: ${{ parameters.pool }}
+              minimumLineCoverage: ${{ parameters.minimumLineCoverage }}
+      - ${{ if eq(parameters.testStack, 'node') }}:
+          - template: ../jobs/node-test.yml
+            parameters:
+              name: UnitTests
+              pool: ${{ parameters.pool }}
+              workingDirectory: ${{ parameters.testWorkingDirectory }}
+              minimumLineCoverage: ${{ parameters.minimumLineCoverage }}
+
+      - template: ../jobs/container-build.yml
+        parameters:
+          name: ContainerBuild
+          pool: ${{ parameters.pool }}
+          azureServiceConnection: ${{ parameters.azureServiceConnection }}
+          acrName: ${{ parameters.acrName }}
+          repository: ${{ parameters.repository }}
+          dockerfile: ${{ parameters.dockerfile }}
+          buildContext: ${{ parameters.buildContext }}
+          buildArgs: ${{ parameters.buildArgs }}
+          pushPolicy: ${{ parameters.pushPolicy }}
+          ${{ if ne(parameters.testStack, 'none') }}:
+            dependsOn:
+              - UnitTests

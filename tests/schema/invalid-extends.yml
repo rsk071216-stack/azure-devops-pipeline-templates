@@ -1,0 +1,8 @@
+# Negative fixture for the schema self-test in CI: `templat` is not a valid key
+# of `extends`, so schema validation MUST reject this file. If it ever passes,
+# the schema check has silently stopped working.
+
+trigger: none
+
+extends:
+  templat: templates/governance/secure-pipeline.yml@templates

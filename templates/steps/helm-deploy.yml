@@ -1,0 +1,97 @@
+# Deploys a Helm chart to AKS by immutable image digest.
+# --rollback-on-failure (Helm 4, formerly --atomic) restores the previous
+# release automatically if the rollout does not become ready within the timeout.
+#
+# Chart contract: the chart must expose the image repository and digest as
+# values (defaults: image.repository and image.digest).
+
+parameters:
+  - name: azureServiceConnection
+    displayName: Azure Resource Manager service connection (Workload Identity Federation)
+    type: string
+  - name: resourceGroup
+    displayName: Resource group of the AKS cluster
+    type: string
+  - name: clusterName
+    displayName: AKS cluster name
+    type: string
+  - name: namespace
+    displayName: Target Kubernetes namespace (must already exist and be RBAC-scoped to the pipeline identity)
+    type: string
+  - name: releaseName
+    displayName: Helm release name
+    type: string
+  - name: chartPath
+    displayName: Path to the chart in the application repository
+    type: string
+  - name: imageRef
+    displayName: Image reference in repository@sha256:digest form
+    type: string
+  - name: valuesFiles
+    displayName: Ordered list of values files
+    type: object
+    default: []
+  - name: setValues
+    displayName: Mapping of extra values, rendered to a JSON values file (never put secrets here)
+    type: object
+    default: {}
+  - name: imageRepositoryKey
+    displayName: Chart value that receives the image repository
+    type: string
+    default: image.repository
+  - name: imageDigestKey
+    displayName: Chart value that receives the image digest
+    type: string
+    default: image.digest
+  - name: timeout
+    displayName: Helm wait timeout (Go duration)
+    type: string
+    default: 10m
+
+steps:
+  - template: aks-script.yml
+    parameters:
+      azureServiceConnection: ${{ parameters.azureServiceConnection }}
+      resourceGroup: ${{ parameters.resourceGroup }}
+      clusterName: ${{ parameters.clusterName }}
+      displayName: helm upgrade ${{ parameters.releaseName }} (${{ parameters.namespace }})
+      env:
+        HELM_RELEASE: ${{ parameters.releaseName }}
+        HELM_CHART: ${{ parameters.chartPath }}
+        HELM_NAMESPACE: ${{ parameters.namespace }}
+        HELM_TIMEOUT: ${{ parameters.timeout }}
+        HELM_VALUES_FILES: ${{ join(';', parameters.valuesFiles) }}
+        HELM_SET_VALUES_JSON: ${{ convertToJson(parameters.setValues) }}
+        IMAGE_REF: ${{ parameters.imageRef }}
+        IMAGE_REPOSITORY_KEY: ${{ parameters.imageRepositoryKey }}
+        IMAGE_DIGEST_KEY: ${{ parameters.imageDigestKey }}
+      script: |
+        if [[ "${IMAGE_REF}" != *@sha256:* ]]; then
+          echo "##vso[task.logissue type=error]imageRef '${IMAGE_REF}' is not digest-pinned; deployments must use repository@sha256:digest"
+          exit 1
+        fi
+        args=(upgrade "${HELM_RELEASE}" "${HELM_CHART}" --install
+          --namespace "${HELM_NAMESPACE}"
+          --rollback-on-failure --wait=watcher --timeout "${HELM_TIMEOUT}"
+          --history-max 10)
+        if [[ -n "${HELM_VALUES_FILES}" ]]; then
+          IFS=';' read -r -a values_files <<< "${HELM_VALUES_FILES}"
+          for f in "${values_files[@]}"; do
+            args+=(--values "${f}")
+          done
+        fi
+        overrides="$(mktemp --suffix .json)"
+        printf '%s' "${HELM_SET_VALUES_JSON}" > "${overrides}"
+        args+=(--values "${overrides}")
+        args+=(--set-string "${IMAGE_REPOSITORY_KEY}=${IMAGE_REF%@*}")
+        args+=(--set-string "${IMAGE_DIGEST_KEY}=${IMAGE_REF#*@}")
+        helm "${args[@]}"
+        helm status "${HELM_RELEASE}" --namespace "${HELM_NAMESPACE}"
+        {
+          echo "### Helm release ${HELM_RELEASE}"
+          echo ""
+          echo "| Namespace | Revision | Image |"
+          echo "|---|---|---|"
+          echo "| ${HELM_NAMESPACE} | $(helm history "${HELM_RELEASE}" --namespace "${HELM_NAMESPACE}" --max 1 --output json | jq -r '.[0].revision') | \`${IMAGE_REF}\` |"
+        } > "$(Agent.TempDirectory)/helm-summary.md"
+        echo "##vso[task.uploadsummary]$(Agent.TempDirectory)/helm-summary.md"

@@ -1,0 +1,61 @@
+# Renders a Terraform plan as a Markdown summary attached to the pipeline run
+# (Extensions tab), so approvers can review exactly what will change before
+# they approve the apply stage. Destructive changes are highlighted and raise a
+# pipeline warning.
+
+parameters:
+  - name: workingDirectory
+    displayName: Terraform root module directory (already initialised)
+    type: string
+  - name: planFile
+    displayName: Path to the binary plan file
+    type: string
+  - name: environmentName
+    displayName: Environment name shown in the summary title
+    type: string
+  - name: maxPlanLines
+    displayName: Truncate the embedded plain-text plan after this many lines
+    type: number
+    default: 400
+
+steps:
+  - bash: |
+      set -euo pipefail
+      summary="$(Agent.TempDirectory)/terraform-plan-${ENV_NAME}.md"
+      terraform show -json "${PLAN_FILE}" > "$(Agent.TempDirectory)/plan.json"
+      terraform show -no-color "${PLAN_FILE}" > "$(Agent.TempDirectory)/plan.txt"
+      count() { jq --arg a "$1" '[.resource_changes[]? | select(.change.actions | join(",") == $a)] | length' "$(Agent.TempDirectory)/plan.json"; }
+      add="$(count create)"
+      change="$(count update)"
+      replace="$(( $(count delete,create) + $(count create,delete) ))"
+      destroy="$(count delete)"
+      {
+        echo "## Terraform plan - ${ENV_NAME}"
+        echo ""
+        echo "| Add | Change | Replace | Destroy |"
+        echo "|---:|---:|---:|---:|"
+        echo "| ${add} | ${change} | ${replace} | ${destroy} |"
+        echo ""
+        if (( destroy + replace > 0 )); then
+          echo "> **Warning:** this plan destroys or replaces resources. Review carefully before approving."
+          echo ""
+          jq -r '.resource_changes[]? | select(.change.actions | index("delete")) | "- `\(.address)` (\(.change.actions | join(" -> ")))"' "$(Agent.TempDirectory)/plan.json"
+          echo ""
+        fi
+        echo "<details><summary>Full plan output</summary>"
+        echo ""
+        echo '```'
+        head -n "${MAX_LINES}" "$(Agent.TempDirectory)/plan.txt"
+        echo '```'
+        echo "</details>"
+      } > "${summary}"
+      if (( destroy + replace > 0 )); then
+        echo "##vso[task.logissue type=warning]${ENV_NAME}: plan destroys ${destroy} and replaces ${replace} resource(s)"
+      fi
+      echo "##vso[task.uploadsummary]${summary}"
+    displayName: Publish plan summary (${{ parameters.environmentName }})
+    workingDirectory: ${{ parameters.workingDirectory }}
+    env:
+      PLAN_FILE: ${{ parameters.planFile }}
+      ENV_NAME: ${{ parameters.environmentName }}
+      MAX_LINES: ${{ parameters.maxPlanLines }}

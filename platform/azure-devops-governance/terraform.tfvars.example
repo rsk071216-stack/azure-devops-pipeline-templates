@@ -1,0 +1,52 @@
+# Example values - copy to terraform.tfvars (git-ignored) and adjust.
+# All IDs below are placeholders.
+
+azure_devops_org_url         = "https://dev.azure.com/contoso"
+project_name                 = "Shop"
+application                  = "shop-web"
+tenant_id                    = "00000000-0000-0000-0000-000000000000"
+identity_subscription_id     = "11111111-1111-1111-1111-111111111111"
+identity_resource_group_name = "rg-pipeline-identities"
+
+required_template = {
+  repository_type = "github"
+  repository_name = "rsk071216-stack/azure-devops-pipeline-templates"
+  template_path   = "templates/governance/secure-pipeline.yml"
+  # Supported template releases. Add the new tag when releasing, remove a tag to retire it.
+  allowed_refs = ["refs/tags/v1.0.0"]
+}
+
+environments = {
+  dev = {
+    subscription_id   = "22222222-2222-2222-2222-222222222222"
+    subscription_name = "shop-nonprod"
+    role_assignments = [
+      { scope = "/subscriptions/22222222-2222-2222-2222-222222222222/resourceGroups/rg-shop-dev", role = "Azure Kubernetes Service Cluster User Role" },
+      { scope = "/subscriptions/22222222-2222-2222-2222-222222222222/resourceGroups/rg-shop-dev/providers/Microsoft.ContainerService/managedClusters/aks-shop-dev/namespaces/shop-web", role = "Azure Kubernetes Service RBAC Writer" },
+    ]
+  }
+  test = {
+    subscription_id   = "22222222-2222-2222-2222-222222222222"
+    subscription_name = "shop-nonprod"
+    approver_groups   = ["Shop QA Leads"]
+    role_assignments = [
+      { scope = "/subscriptions/22222222-2222-2222-2222-222222222222/resourceGroups/rg-shop-test", role = "Azure Kubernetes Service Cluster User Role" },
+    ]
+  }
+  prod = {
+    subscription_id   = "33333333-3333-3333-3333-333333333333"
+    subscription_name = "shop-prod"
+    approver_groups   = ["Shop Release Managers", "Shop Product Owners"]
+    min_approvers     = 2
+    exclusive_lock    = true
+    business_hours = {
+      start_time = "08:00"
+      end_time   = "16:00"
+      time_zone  = "W. Europe Standard Time"
+      days       = ["monday", "tuesday", "wednesday", "thursday"]
+    }
+    role_assignments = [
+      { scope = "/subscriptions/33333333-3333-3333-3333-333333333333/resourceGroups/rg-shop-prod", role = "Azure Kubernetes Service Cluster User Role" },
+    ]
+  }
+}

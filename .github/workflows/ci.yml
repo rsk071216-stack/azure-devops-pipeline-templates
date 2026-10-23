@@ -1,0 +1,121 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+    tags: ["v*.*.*"]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  YQ_VERSION: v4.54.1
+  YQ_SHA256: 8e34fc298390875de416e6a4afcb8cabeceb25d9aa8506c1a2f9353cf702ea5f
+  ACTIONLINT_VERSION: 1.7.12
+  ACTIONLINT_SHA256: 8aca8db96f1b94770f1b0d72b6dddcb1ebb8123cb3712530b08cc387b349a3d8
+  YAMLLINT_VERSION: 1.38.0
+  CHECK_JSONSCHEMA_VERSION: 0.38.2
+  TERRAFORM_VERSION: 1.16.5
+  # Azure Pipelines schema pinned to an immutable commit of microsoft/azure-pipelines-vscode.
+  AZP_SCHEMA_URL: https://raw.githubusercontent.com/microsoft/azure-pipelines-vscode/e8090fd525cd6ba47d7685c698f3f51983e298c6/service-schema.json
+
+jobs:
+  yamllint:
+    name: yamllint
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Install yamllint
+        run: pipx install "yamllint==${YAMLLINT_VERSION}"
+      - name: Lint all YAML
+        run: yamllint --strict --format github .
+
+  template-lint:
+    name: Template contract (parse, typing, docs, pinning, versions)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Install yq (sha256 verified)
+        run: |
+          curl -fsSL -o "${RUNNER_TEMP}/yq" "https://github.com/mikefarah/yq/releases/download/${YQ_VERSION}/yq_linux_amd64"
+          echo "${YQ_SHA256}  ${RUNNER_TEMP}/yq" | sha256sum --check --strict
+          chmod +x "${RUNNER_TEMP}/yq"
+          echo "${RUNNER_TEMP}" >> "${GITHUB_PATH}"
+      - name: shellcheck scripts
+        run: shellcheck --severity=style scripts/*.sh
+      - name: Lint templates
+        run: bash scripts/lint-templates.sh
+
+  actionlint:
+    name: actionlint
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Install actionlint (sha256 verified)
+        run: |
+          archive="actionlint_${ACTIONLINT_VERSION}_linux_amd64.tar.gz"
+          curl -fsSL -o "${RUNNER_TEMP}/${archive}" "https://github.com/rhysd/actionlint/releases/download/v${ACTIONLINT_VERSION}/${archive}"
+          echo "${ACTIONLINT_SHA256}  ${RUNNER_TEMP}/${archive}" | sha256sum --check --strict
+          tar -xzf "${RUNNER_TEMP}/${archive}" -C "${RUNNER_TEMP}" actionlint
+      - name: Lint workflows (with shellcheck)
+        run: '"${RUNNER_TEMP}/actionlint" -color'
+
+  pipeline-schema:
+    name: Azure Pipelines schema (example root pipelines)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Install check-jsonschema
+        run: pipx install "check-jsonschema==${CHECK_JSONSCHEMA_VERSION}"
+      - name: Download pinned schema
+        run: curl -fsSL -o "${RUNNER_TEMP}/azure-pipelines.schema.json" "${AZP_SCHEMA_URL}"
+      - name: Validate example pipelines
+        run: check-jsonschema --schemafile "${RUNNER_TEMP}/azure-pipelines.schema.json" examples/*/azure-pipelines.yml
+      - name: Self-test - an invalid pipeline must be rejected
+        run: |
+          if check-jsonschema --schemafile "${RUNNER_TEMP}/azure-pipelines.schema.json" tests/schema/invalid-extends.yml; then
+            echo "::error::schema validation accepted a known-invalid pipeline"
+            exit 1
+          fi
+          echo "invalid pipeline correctly rejected"
+
+  terraform:
+    name: Terraform (governance as code)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    defaults:
+      run:
+        working-directory: platform/azure-devops-governance
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: hashicorp/setup-terraform@dfe3c3f87815947d99a8997f908cb6525fc44e9e # v4.0.1
+        with:
+          terraform_version: ${{ env.TERRAFORM_VERSION }}
+          terraform_wrapper: false
+      - name: terraform fmt
+        run: terraform fmt -check -recursive -diff
+      - name: terraform init (no backend)
+        run: terraform init -backend=false -input=false
+      - name: terraform validate
+        run: terraform validate

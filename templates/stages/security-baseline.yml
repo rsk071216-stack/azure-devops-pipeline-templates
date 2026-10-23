@@ -1,0 +1,39 @@
+# Stage: mandatory security baseline. Injected by governance/secure-pipeline.yml
+# into every pipeline as the first stage; every consumer stage depends on it.
+# Jobs run in parallel to keep the added wall-clock time to a minimum.
+
+parameters:
+  - name: securityProfile
+    displayName: standard blocks HIGH and CRITICAL findings, strict also blocks MEDIUM
+    type: string
+    default: standard
+    values:
+      - standard
+      - strict
+  - name: pool
+    displayName: Agent pool
+    type: object
+    default:
+      vmImage: ubuntu-24.04
+
+stages:
+  - stage: SecurityBaseline
+    displayName: Security baseline (mandatory)
+    dependsOn: []
+    jobs:
+      - template: ../jobs/secret-scan.yml
+        parameters:
+          pool: ${{ parameters.pool }}
+          # Audit trail: every governed run is tagged with the library version
+          # (kept in sync with CHANGELOG.md by scripts/lint-templates.sh).
+          buildTags:
+            - governed
+            - template-library-v1.0.0
+            - security-profile-${{ parameters.securityProfile }}
+      - template: ../jobs/supply-chain-scan.yml
+        parameters:
+          pool: ${{ parameters.pool }}
+          ${{ if eq(parameters.securityProfile, 'strict') }}:
+            severity: MEDIUM,HIGH,CRITICAL
+          ${{ else }}:
+            severity: HIGH,CRITICAL

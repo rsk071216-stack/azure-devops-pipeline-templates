@@ -1,0 +1,101 @@
+# Deployment job: applies the exact plan that was reviewed.
+# Runs against an Azure DevOps environment, so approvals, business hours,
+# exclusive lock and the Required template check are enforced by the platform
+# before a single command executes. Terraform refuses a stale plan, so a state
+# change between plan and apply fails safely instead of applying a surprise.
+# Rollback strategy: infrastructure rolls forward (revert the commit and let the
+# pipeline produce a new reviewed plan) - Terraform has no safe automatic undo.
+
+parameters:
+  - name: name
+    displayName: Job identifier
+    type: string
+    default: Apply
+  - name: environmentName
+    displayName: Logical environment name (selects the tfplan-<name> artifact)
+    type: string
+  - name: environment
+    displayName: Azure DevOps environment that carries the approvals and checks
+    type: string
+  - name: azureServiceConnection
+    displayName: ARM service connection used for the apply (Contributor-level, scoped)
+    type: string
+  - name: backendServiceConnection
+    displayName: ARM service connection for the state backend (defaults to azureServiceConnection)
+    type: string
+    default: ''
+  - name: workingDirectory
+    displayName: Terraform root module directory
+    type: string
+  - name: terraformVersion
+    displayName: Terraform CLI version (must match the plan job)
+    type: string
+    default: 1.16.5
+  - name: backendResourceGroup
+    displayName: Resource group of the state storage account
+    type: string
+  - name: backendStorageAccount
+    displayName: State storage account name
+    type: string
+  - name: backendContainer
+    displayName: Blob container holding the state files
+    type: string
+    default: tfstate
+  - name: backendKey
+    displayName: State blob name
+    type: string
+  - name: pool
+    displayName: Agent pool
+    type: object
+    default:
+      vmImage: ubuntu-24.04
+  - name: timeoutInMinutes
+    displayName: Job timeout
+    type: number
+    default: 60
+
+jobs:
+  - deployment: ${{ parameters.name }}
+    displayName: Terraform apply (${{ parameters.environmentName }})
+    pool: ${{ parameters.pool }}
+    timeoutInMinutes: ${{ parameters.timeoutInMinutes }}
+    environment: ${{ parameters.environment }}
+    strategy:
+      runOnce:
+        deploy:
+          steps:
+            - checkout: self
+              fetchDepth: 1
+              persistCredentials: false
+
+            - download: current
+              artifact: tfplan-${{ parameters.environmentName }}
+              displayName: Download reviewed plan
+
+            - bash: cp "$(Pipeline.Workspace)/tfplan-${PLAN_ENV}/.terraform.lock.hcl" .
+              displayName: Restore provider lock file from the plan
+              workingDirectory: ${{ parameters.workingDirectory }}
+              env:
+                PLAN_ENV: ${{ parameters.environmentName }}
+
+            - template: ../steps/terraform-init.yml
+              parameters:
+                workingDirectory: ${{ parameters.workingDirectory }}
+                terraformVersion: ${{ parameters.terraformVersion }}
+                ${{ if eq(parameters.backendServiceConnection, '') }}:
+                  backendServiceConnection: ${{ parameters.azureServiceConnection }}
+                ${{ else }}:
+                  backendServiceConnection: ${{ parameters.backendServiceConnection }}
+                backendResourceGroup: ${{ parameters.backendResourceGroup }}
+                backendStorageAccount: ${{ parameters.backendStorageAccount }}
+                backendContainer: ${{ parameters.backendContainer }}
+                backendKey: ${{ parameters.backendKey }}
+
+            - task: TerraformTask@5
+              displayName: terraform apply (${{ parameters.environmentName }})
+              inputs:
+                provider: azurerm
+                command: apply
+                workingDirectory: ${{ parameters.workingDirectory }}
+                environmentServiceNameAzureRM: ${{ parameters.azureServiceConnection }}
+                commandOptions: -input=false -lock-timeout=5m $(Pipeline.Workspace)/tfplan-${{ parameters.environmentName }}/tfplan

@@ -1,0 +1,98 @@
+# Rolls an application back to its previous revision. Used from the
+# on.failure lifecycle hook of jobs/aks-deploy.yml, so it runs automatically
+# when the deployment or the post-deployment smoke test fails.
+#
+# Safety: the rollback only happens when the workload currently runs the image
+# digest that THIS run deployed. If the job failed before anything was rolled
+# out (e.g. tool installation), the healthy release is left untouched.
+
+parameters:
+  - name: azureServiceConnection
+    displayName: Azure Resource Manager service connection (Workload Identity Federation)
+    type: string
+  - name: resourceGroup
+    displayName: Resource group of the AKS cluster
+    type: string
+  - name: clusterName
+    displayName: AKS cluster name
+    type: string
+  - name: namespace
+    displayName: Kubernetes namespace
+    type: string
+  - name: method
+    displayName: Deployment method that produced the release
+    type: string
+    values:
+      - helm
+      - kustomize
+  - name: imageRef
+    displayName: Image reference (repository@sha256:digest) that this run attempted to deploy
+    type: string
+  - name: releaseName
+    displayName: Helm release name (helm only)
+    type: string
+    default: ''
+  - name: imageDigestKey
+    displayName: Chart value holding the image digest (helm only)
+    type: string
+    default: image.digest
+  - name: rolloutResources
+    displayName: Workloads to undo (kustomize only)
+    type: object
+    default: []
+
+steps:
+  - template: aks-script.yml
+    parameters:
+      azureServiceConnection: ${{ parameters.azureServiceConnection }}
+      resourceGroup: ${{ parameters.resourceGroup }}
+      clusterName: ${{ parameters.clusterName }}
+      displayName: Automatic rollback (${{ parameters.method }})
+      env:
+        DEPLOY_METHOD: ${{ parameters.method }}
+        K8S_NAMESPACE: ${{ parameters.namespace }}
+        HELM_RELEASE: ${{ parameters.releaseName }}
+        IMAGE_REF: ${{ parameters.imageRef }}
+        IMAGE_DIGEST_KEY: ${{ parameters.imageDigestKey }}
+        ROLLOUT_RESOURCES: ${{ join(';', parameters.rolloutResources) }}
+      script: |
+        digest="${IMAGE_REF#*@}"
+        echo "Deployment failed - evaluating rollback of ${DEPLOY_METHOD} workload in ${K8S_NAMESPACE} (digest ${digest})"
+        if [[ "${DEPLOY_METHOD}" == "helm" ]]; then
+          revisions="$(helm history "${HELM_RELEASE}" --namespace "${K8S_NAMESPACE}" --output json 2>/dev/null | jq 'length' || echo 0)"
+          if [[ "${revisions}" -eq 0 ]]; then
+            echo "Release ${HELM_RELEASE} does not exist - nothing to roll back."
+            exit 0
+          fi
+          latest="$(helm history "${HELM_RELEASE}" --namespace "${K8S_NAMESPACE}" --max 1 --output json | jq -r '.[0].description')"
+          if [[ "${latest}" == Rollback* ]]; then
+            echo "Helm already restored the previous release (--rollback-on-failure): ${latest}"
+            exit 0
+          fi
+          running="$(helm get values "${HELM_RELEASE}" --namespace "${K8S_NAMESPACE}" --output json \
+            | jq -r --arg key "${IMAGE_DIGEST_KEY}" 'getpath($key | split(".")) // ""')"
+          if [[ "${running}" != "${digest}" ]]; then
+            echo "Release runs ${running:-<unknown>}, not the digest from this run - leaving it untouched."
+            exit 0
+          fi
+          if [[ "${revisions}" -lt 2 ]]; then
+            echo "First install failed verification - uninstalling ${HELM_RELEASE}."
+            helm uninstall "${HELM_RELEASE}" --namespace "${K8S_NAMESPACE}" --wait
+          else
+            helm rollback "${HELM_RELEASE}" --namespace "${K8S_NAMESPACE}" --wait --timeout 10m
+            helm history "${HELM_RELEASE}" --namespace "${K8S_NAMESPACE}" --max 3
+          fi
+        else
+          IFS=';' read -r -a resources <<< "${ROLLOUT_RESOURCES}"
+          for r in "${resources[@]}"; do
+            images="$(kubectl get "${r}" --namespace "${K8S_NAMESPACE}" --output jsonpath='{..image}' 2>/dev/null || true)"
+            if [[ "${images}" != *"${digest}"* ]]; then
+              echo "${r} does not run the digest from this run - skipping."
+              continue
+            fi
+            kubectl rollout undo "${r}" --namespace "${K8S_NAMESPACE}"
+            kubectl rollout status "${r}" --namespace "${K8S_NAMESPACE}" --timeout 10m
+          done
+        fi
+        echo "##vso[task.logissue type=warning]Automatic rollback executed for ${DEPLOY_METHOD} workload in ${K8S_NAMESPACE}"
+        echo "##vso[build.addbuildtag]rolled-back"

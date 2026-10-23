@@ -1,0 +1,89 @@
+# Job: .NET restore, build and test with coverlet code coverage, published to
+# the Tests and Code Coverage tabs and enforced by a coverage gate.
+
+parameters:
+  - name: name
+    displayName: Job identifier
+    type: string
+    default: DotNetTest
+  - name: dotnetVersion
+    displayName: .NET SDK version or wildcard (ignored when useGlobalJson is true)
+    type: string
+    default: 10.0.x
+  - name: useGlobalJson
+    displayName: Resolve the SDK version from global.json
+    type: boolean
+    default: false
+  - name: projects
+    displayName: Glob of test projects
+    type: string
+    default: '**/*Tests.csproj'
+  - name: buildConfiguration
+    displayName: Build configuration
+    type: string
+    default: Release
+    values:
+      - Debug
+      - Release
+  - name: minimumLineCoverage
+    displayName: Minimum line coverage in percent (0 disables the gate)
+    type: number
+    default: 80
+  - name: pool
+    displayName: Agent pool
+    type: object
+    default:
+      vmImage: ubuntu-24.04
+  - name: dependsOn
+    displayName: Jobs this job depends on
+    type: object
+    default: []
+  - name: timeoutInMinutes
+    displayName: Job timeout
+    type: number
+    default: 30
+
+jobs:
+  - job: ${{ parameters.name }}
+    displayName: .NET tests + coverage
+    pool: ${{ parameters.pool }}
+    dependsOn: ${{ parameters.dependsOn }}
+    timeoutInMinutes: ${{ parameters.timeoutInMinutes }}
+    variables:
+      DOTNET_CLI_TELEMETRY_OPTOUT: 'true'
+      DOTNET_NOLOGO: 'true'
+    steps:
+      - checkout: self
+        fetchDepth: 1
+        persistCredentials: false
+
+      - task: UseDotNet@2
+        displayName: Install .NET SDK
+        inputs:
+          packageType: sdk
+          ${{ if parameters.useGlobalJson }}:
+            useGlobalJson: true
+          ${{ else }}:
+            version: ${{ parameters.dotnetVersion }}
+
+      - task: DotNetCoreCLI@2
+        displayName: dotnet test
+        inputs:
+          command: test
+          projects: ${{ parameters.projects }}
+          arguments: --configuration ${{ parameters.buildConfiguration }} --collect "XPlat Code Coverage"
+          publishTestResults: true
+          testRunTitle: $(Build.DefinitionName) - unit tests
+
+      - task: PublishCodeCoverageResults@2
+        displayName: Publish code coverage
+        condition: succeededOrFailed()
+        inputs:
+          summaryFileLocation: $(Agent.TempDirectory)/**/coverage.cobertura.xml
+          failIfCoverageEmpty: true
+
+      - ${{ if gt(parameters.minimumLineCoverage, 0) }}:
+          - template: ../steps/coverage-gate.yml
+            parameters:
+              searchDirectory: $(Agent.TempDirectory)
+              minimumLineCoverage: ${{ parameters.minimumLineCoverage }}

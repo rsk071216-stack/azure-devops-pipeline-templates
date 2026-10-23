@@ -1,0 +1,136 @@
+# Job: Terraform fmt/validate, IaC scan, plan.
+# Produces:
+#   - pipeline artifact  tfplan-<environment>  (binary plan + provider lock file)
+#   - Terraform Plan tab entry and a Markdown run summary for approvers
+#   - output variable    <job>.plan.changesPresent  ('true' / 'false')
+# The plan runs with a plan-only identity (Reader + state access); the apply
+# job uses a separate, more privileged identity behind an environment approval.
+
+parameters:
+  - name: name
+    displayName: Job identifier (referenced in output variable paths)
+    type: string
+    default: Plan
+  - name: environmentName
+    displayName: Logical environment name (dev, test, prod...)
+    type: string
+  - name: azureServiceConnection
+    displayName: ARM service connection used for the plan (least privilege - Reader)
+    type: string
+  - name: backendServiceConnection
+    displayName: ARM service connection for the state backend (defaults to azureServiceConnection)
+    type: string
+    default: ''
+  - name: workingDirectory
+    displayName: Terraform root module directory
+    type: string
+  - name: terraformVersion
+    displayName: Terraform CLI version
+    type: string
+    default: 1.16.5
+  - name: backendResourceGroup
+    displayName: Resource group of the state storage account
+    type: string
+  - name: backendStorageAccount
+    displayName: State storage account name
+    type: string
+  - name: backendContainer
+    displayName: Blob container holding the state files
+    type: string
+    default: tfstate
+  - name: backendKey
+    displayName: State blob name
+    type: string
+  - name: varFile
+    displayName: Optional tfvars file, relative to workingDirectory
+    type: string
+    default: ''
+  - name: iacScan
+    displayName: Run a Trivy misconfiguration scan on the module before planning
+    type: boolean
+    default: true
+  - name: pool
+    displayName: Agent pool
+    type: object
+    default:
+      vmImage: ubuntu-24.04
+  - name: timeoutInMinutes
+    displayName: Job timeout
+    type: number
+    default: 30
+
+jobs:
+  - job: ${{ parameters.name }}
+    displayName: Terraform plan (${{ parameters.environmentName }})
+    pool: ${{ parameters.pool }}
+    timeoutInMinutes: ${{ parameters.timeoutInMinutes }}
+    variables:
+      planDirectory: $(Build.ArtifactStagingDirectory)/tfplan
+    steps:
+      - checkout: self
+        fetchDepth: 1
+        persistCredentials: false
+
+      - ${{ if parameters.iacScan }}:
+          - template: ../steps/trivy-scan.yml
+            parameters:
+              scanType: config
+              target: ${{ parameters.workingDirectory }}
+              artifactName: security-trivy-iac-${{ parameters.environmentName }}
+
+      - template: ../steps/terraform-init.yml
+        parameters:
+          workingDirectory: ${{ parameters.workingDirectory }}
+          terraformVersion: ${{ parameters.terraformVersion }}
+          ${{ if eq(parameters.backendServiceConnection, '') }}:
+            backendServiceConnection: ${{ parameters.azureServiceConnection }}
+          ${{ else }}:
+            backendServiceConnection: ${{ parameters.backendServiceConnection }}
+          backendResourceGroup: ${{ parameters.backendResourceGroup }}
+          backendStorageAccount: ${{ parameters.backendStorageAccount }}
+          backendContainer: ${{ parameters.backendContainer }}
+          backendKey: ${{ parameters.backendKey }}
+
+      - bash: terraform fmt -check -recursive -diff
+        displayName: terraform fmt -check
+        workingDirectory: ${{ parameters.workingDirectory }}
+
+      - task: TerraformTask@5
+        displayName: terraform validate
+        inputs:
+          provider: azurerm
+          command: validate
+          workingDirectory: ${{ parameters.workingDirectory }}
+
+      - bash: mkdir -p "$(planDirectory)"
+        displayName: Prepare plan directory
+
+      - task: TerraformTask@5
+        name: plan
+        displayName: terraform plan (${{ parameters.environmentName }})
+        inputs:
+          provider: azurerm
+          command: plan
+          workingDirectory: ${{ parameters.workingDirectory }}
+          environmentServiceNameAzureRM: ${{ parameters.azureServiceConnection }}
+          ${{ if eq(parameters.varFile, '') }}:
+            commandOptions: -input=false -lock-timeout=5m -out=$(planDirectory)/tfplan
+          ${{ else }}:
+            commandOptions: -input=false -lock-timeout=5m -var-file=${{ parameters.varFile }} -out=$(planDirectory)/tfplan
+          publishPlan: ${{ parameters.environmentName }}
+
+      - template: ../steps/terraform-plan-summary.yml
+        parameters:
+          workingDirectory: ${{ parameters.workingDirectory }}
+          planFile: $(planDirectory)/tfplan
+          environmentName: ${{ parameters.environmentName }}
+
+      - bash: cp .terraform.lock.hcl "$(planDirectory)/"
+        displayName: Bundle provider lock file with the plan
+        workingDirectory: ${{ parameters.workingDirectory }}
+
+      - task: PublishPipelineArtifact@1
+        displayName: Publish plan artifact
+        inputs:
+          targetPath: $(planDirectory)
+          artifact: tfplan-${{ parameters.environmentName }}

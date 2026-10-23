@@ -1,0 +1,54 @@
+# Builds a container image with BuildKit and stamps OCI provenance labels.
+# The image is only loaded into the local daemon; pushing is a separate step so
+# that nothing reaches the registry before it has passed the vulnerability gate.
+
+parameters:
+  - name: imageRef
+    displayName: Full image reference to build, e.g. myacr.azurecr.io/shop-web:1234
+    type: string
+  - name: dockerfile
+    displayName: Path to the Dockerfile
+    type: string
+    default: Dockerfile
+  - name: buildContext
+    displayName: Docker build context
+    type: string
+    default: .
+  - name: buildArgs
+    displayName: List of KEY=VALUE build arguments (never pass secrets here; use BuildKit secrets)
+    type: object
+    default: []
+  - name: target
+    displayName: Optional multi-stage build target
+    type: string
+    default: ''
+
+steps:
+  - bash: |
+      set -euo pipefail
+      args=(
+        --file "${DOCKERFILE}"
+        --tag "${IMAGE_REF}"
+        --label "org.opencontainers.image.revision=$(Build.SourceVersion)"
+        --label "org.opencontainers.image.source=$(Build.Repository.Uri)"
+        --label "org.opencontainers.image.created=$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+        --label "com.azure.devops.pipeline.run=$(System.CollectionUri)$(System.TeamProject)/_build/results?buildId=$(Build.BuildId)"
+      )
+      if [[ -n "${BUILD_TARGET}" ]]; then
+        args+=(--target "${BUILD_TARGET}")
+      fi
+      if [[ -n "${BUILD_ARGS}" ]]; then
+        IFS=';' read -r -a build_args <<< "${BUILD_ARGS}"
+        for arg in "${build_args[@]}"; do
+          args+=(--build-arg "${arg}")
+        done
+      fi
+      docker build "${args[@]}" "${BUILD_CONTEXT}"
+    displayName: docker build ${{ parameters.imageRef }}
+    env:
+      DOCKER_BUILDKIT: '1'
+      IMAGE_REF: ${{ parameters.imageRef }}
+      DOCKERFILE: ${{ parameters.dockerfile }}
+      BUILD_CONTEXT: ${{ parameters.buildContext }}
+      BUILD_TARGET: ${{ parameters.target }}
+      BUILD_ARGS: ${{ join(';', parameters.buildArgs) }}

@@ -1,0 +1,44 @@
+# Enforces a minimum line-coverage percentage across one or more Cobertura
+# reports. PublishCodeCoverageResults only visualises coverage; this step turns
+# it into a quality gate. Works for coverlet (.NET) and istanbul/c8 (Node).
+
+parameters:
+  - name: searchDirectory
+    displayName: Directory searched recursively for Cobertura files
+    type: string
+  - name: fileName
+    displayName: Cobertura file name to look for
+    type: string
+    default: coverage.cobertura.xml
+  - name: minimumLineCoverage
+    displayName: Minimum line coverage in percent (0 disables the gate)
+    type: number
+    default: 80
+
+steps:
+  - bash: |
+      set -euo pipefail
+      mapfile -t files < <(find "${SEARCH_DIR}" -type f -name "${FILE_NAME}")
+      if [[ ${#files[@]} -eq 0 ]]; then
+        echo "##vso[task.logissue type=error]No '${FILE_NAME}' found under ${SEARCH_DIR}"
+        exit 1
+      fi
+      covered=0
+      valid=0
+      for f in "${files[@]}"; do
+        c="$(grep -o -m1 'lines-covered="[0-9]*"' "${f}" | grep -o '[0-9]\+' || echo 0)"
+        v="$(grep -o -m1 'lines-valid="[0-9]*"' "${f}" | grep -o '[0-9]\+' || echo 0)"
+        covered=$((covered + c))
+        valid=$((valid + v))
+      done
+      pct="$(awk -v c="${covered}" -v v="${valid}" 'BEGIN { if (v == 0) { print "0.00" } else { printf "%.2f", (c / v) * 100 } }')"
+      echo "Line coverage: ${pct}% (${covered}/${valid} lines across ${#files[@]} report(s)), minimum: ${MIN_COVERAGE}%"
+      if awk -v p="${pct}" -v m="${MIN_COVERAGE}" 'BEGIN { exit !(p < m) }'; then
+        echo "##vso[task.logissue type=error]Line coverage ${pct}% is below the required ${MIN_COVERAGE}%"
+        exit 1
+      fi
+    displayName: Coverage gate (>= ${{ parameters.minimumLineCoverage }}% lines)
+    env:
+      SEARCH_DIR: ${{ parameters.searchDirectory }}
+      FILE_NAME: ${{ parameters.fileName }}
+      MIN_COVERAGE: ${{ parameters.minimumLineCoverage }}

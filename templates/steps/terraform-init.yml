@@ -1,0 +1,48 @@
+# Installs a pinned Terraform CLI and initialises the azurerm backend.
+# TerraformTask@5 authenticates to the state storage account with Entra ID
+# through the Workload Identity Federation service connection
+# (use_azuread_auth + OIDC) - no storage account keys, no client secrets.
+
+parameters:
+  - name: workingDirectory
+    displayName: Terraform root module directory
+    type: string
+  - name: terraformVersion
+    displayName: Terraform CLI version
+    type: string
+    default: 1.16.5
+  - name: backendServiceConnection
+    displayName: Service connection used to access the state storage account
+    type: string
+  - name: backendResourceGroup
+    displayName: Resource group of the state storage account
+    type: string
+  - name: backendStorageAccount
+    displayName: State storage account name
+    type: string
+  - name: backendContainer
+    displayName: Blob container holding the state files
+    type: string
+  - name: backendKey
+    displayName: State blob name, e.g. shop/dev.tfstate
+    type: string
+
+steps:
+  - task: TerraformInstaller@1
+    displayName: Install Terraform ${{ parameters.terraformVersion }}
+    inputs:
+      terraformVersion: ${{ parameters.terraformVersion }}
+
+  - task: TerraformTask@5
+    displayName: terraform init (${{ parameters.backendKey }})
+    inputs:
+      provider: azurerm
+      command: init
+      workingDirectory: ${{ parameters.workingDirectory }}
+      commandOptions: -input=false -lockfile=readonly
+      backendServiceArm: ${{ parameters.backendServiceConnection }}
+      backendAzureRmResourceGroupName: ${{ parameters.backendResourceGroup }}
+      backendAzureRmStorageAccountName: ${{ parameters.backendStorageAccount }}
+      backendAzureRmContainerName: ${{ parameters.backendContainer }}
+      backendAzureRmKey: ${{ parameters.backendKey }}
+      backendAzureRmUseEntraIdForAuthentication: true

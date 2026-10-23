@@ -1,0 +1,142 @@
+# =============================================================================
+# secure-pipeline.yml - the governance "extends" template
+# =============================================================================
+# Every pipeline in the organisation extends this template. Combined with the
+# "Required template" check on environments and service connections, it is the
+# only way a pipeline can reach a protected resource.
+#
+# What it enforces at COMPILE time (the run never starts if a rule is broken):
+#   1. A mandatory SecurityBaseline stage (gitleaks + syft SBOM + Trivy fs) is
+#      injected first; every consumer stage depends on it, directly or through
+#      the implicit sequential chain.
+#   2. Consumer stages that set dependsOn get SecurityBaseline prepended, and a
+#      custom condition is wrapped in and(succeeded('SecurityBaseline'), ...),
+#      so `condition: always()` cannot bypass the baseline.
+#   3. Stage, job and step templates must come from this repository (@templates).
+#   4. Raw `deployment` jobs are rejected - deployments must use the library's
+#      deployment job templates (approvals, rollback, digest pinning built in).
+#   5. Inline scripts (script/bash/powershell/pwsh, inline task scripts) and
+#      shell-wrapper tasks are rejected in consumer-authored steps.
+#   6. checkout with persistCredentials: true is rejected.
+#
+# Violations surface as a compile error whose text starts with
+# "POLICY VIOLATION", e.g.
+#   /templates/governance/secure-pipeline.yml (Line: <n>, Col: <m>):
+#   Unexpected value 'POLICY VIOLATION - inline script steps ...'
+#
+# Consumer contract: dependsOn must be written as a YAML list.
+# =============================================================================
+
+parameters:
+  - name: stages
+    displayName: Consumer stages - raw stages or stage templates from @templates
+    type: stageList
+    default: []
+  - name: securityProfile
+    displayName: standard blocks HIGH/CRITICAL findings, strict also blocks MEDIUM
+    type: string
+    default: standard
+    values:
+      - standard
+      - strict
+  - name: pool
+    displayName: Agent pool for the injected security stage
+    type: object
+    default:
+      vmImage: ubuntu-24.04
+
+stages:
+  # ---------------------------------------------------------------------------
+  # 1. Mandatory security baseline (not configurable by consumers)
+  # ---------------------------------------------------------------------------
+  - template: ../stages/security-baseline.yml
+    parameters:
+      securityProfile: ${{ parameters.securityProfile }}
+      pool: ${{ parameters.pool }}
+
+  # ---------------------------------------------------------------------------
+  # 2. Consumer stages, validated and rewritten
+  # ---------------------------------------------------------------------------
+  - ${{ each stage in parameters.stages }}:
+
+      # --- Stage templates -----------------------------------------------------
+      - ${{ if stage.template }}:
+          - ${{ if endsWith(stage.template, '@templates') }}:
+              - template: ${{ stage.template }}
+                parameters:
+                  ${{ each param in stage.parameters }}:
+                    ${{ if ne(param.key, 'dependsOn') }}:
+                      ${{ param.key }}: ${{ param.value }}
+                  ${{ if stage.parameters.dependsOn }}:
+                    dependsOn:
+                      - SecurityBaseline
+                      - ${{ each dep in stage.parameters.dependsOn }}:
+                          - ${{ dep }}
+          - ${{ else }}:
+              - 'POLICY VIOLATION - stage templates must come from the governed template repository (alias @templates)': error
+
+      # --- Raw stages ----------------------------------------------------------
+      - ${{ else }}:
+          - ${{ each stagePair in stage }}:
+              ${{ if notIn(stagePair.key, 'dependsOn', 'condition', 'jobs') }}:
+                ${{ stagePair.key }}: ${{ stagePair.value }}
+            ${{ if stage.dependsOn }}:
+              dependsOn:
+                - SecurityBaseline
+                - ${{ each dep in stage.dependsOn }}:
+                    - ${{ dep }}
+            ${{ if stage.condition }}:
+              ${{ if stage.dependsOn }}:
+                condition: and(succeeded('SecurityBaseline'), ${{ stage.condition }})
+              ${{ else }}:
+                'POLICY VIOLATION - a stage with a custom condition must declare dependsOn as a list': error
+            jobs:
+              - ${{ each job in stage.jobs }}:
+
+                  # Job templates: only from the governed repository.
+                  - ${{ if job.template }}:
+                      - ${{ if endsWith(job.template, '@templates') }}:
+                          - template: ${{ job.template }}
+                            ${{ if job.parameters }}:
+                              parameters: ${{ job.parameters }}
+                      - ${{ else }}:
+                          - 'POLICY VIOLATION - job templates must come from the governed template repository (alias @templates)': error
+
+                  # Deployment jobs: only through library templates.
+                  - ${{ elseif job.deployment }}:
+                      - 'POLICY VIOLATION - raw deployment jobs are not allowed; use jobs/aks-deploy.yml or jobs/terraform-apply.yml from @templates': error
+
+                  # Regular jobs: every step is inspected.
+                  - ${{ else }}:
+                      - ${{ each jobPair in job }}:
+                          ${{ if ne(jobPair.key, 'steps') }}:
+                            ${{ jobPair.key }}: ${{ jobPair.value }}
+                        steps:
+                          - ${{ each step in job.steps }}:
+
+                              # Step templates: only from the governed repository.
+                              - ${{ if step.template }}:
+                                  - ${{ if endsWith(step.template, '@templates') }}:
+                                      - template: ${{ step.template }}
+                                        ${{ if step.parameters }}:
+                                          parameters: ${{ step.parameters }}
+                                  - ${{ else }}:
+                                      - 'POLICY VIOLATION - step templates must come from the governed template repository (alias @templates)': error
+
+                              # Everything else is copied key by key, rejecting forbidden keys.
+                              - ${{ else }}:
+                                  - ${{ each stepPair in step }}:
+                                      ${{ if in(stepPair.key, 'script', 'bash', 'powershell', 'pwsh') }}:
+                                        'POLICY VIOLATION - inline script steps (script, bash, powershell, pwsh) are not allowed; use a step template from @templates or a pinned task': error
+                                      ${{ elseif and(eq(stepPair.key, 'task'), in(stepPair.value, 'CmdLine@2', 'Bash@3', 'PowerShell@2', 'ShellScript@2', 'BatchScript@1', 'AzurePowerShell@5')) }}:
+                                        'POLICY VIOLATION - shell wrapper tasks are not allowed in consumer steps': error
+                                      ${{ elseif and(eq(stepPair.key, 'inputs'), eq(stepPair.value.scriptLocation, 'inlineScript')) }}:
+                                        'POLICY VIOLATION - inline task scripts (scriptLocation inlineScript) are not allowed': error
+                                      ${{ elseif and(eq(stepPair.key, 'inputs'), eq(stepPair.value.targetType, 'inline')) }}:
+                                        'POLICY VIOLATION - inline task scripts (targetType inline) are not allowed': error
+                                      ${{ elseif and(eq(stepPair.key, 'inputs'), eq(stepPair.value.ScriptType, 'InlineScript')) }}:
+                                        'POLICY VIOLATION - inline task scripts (ScriptType InlineScript) are not allowed': error
+                                      ${{ elseif and(eq(stepPair.key, 'persistCredentials'), eq(stepPair.value, true)) }}:
+                                        'POLICY VIOLATION - checkout with persistCredentials true is not allowed': error
+                                      ${{ else }}:
+                                        ${{ stepPair.key }}: ${{ stepPair.value }}
