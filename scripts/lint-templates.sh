@@ -99,6 +99,8 @@ for f in "${templates[@]}"; do
   for p in "${params[@]}"; do
     grep -qF "| \`${p}\` |" <<< "${section_text}" || fail "${CATALOGUE}" "${f}: parameter '${p}' is not documented"
   done
+  # Backticks below are literal Markdown, not command substitution.
+  # shellcheck disable=SC2016
   while read -r documented; do
     printf '%s\n' "${params[@]}" | grep -qxF "${documented}" || fail "${CATALOGUE}" "${f}: documents unknown parameter '${documented}'"
   done < <(grep -oE '^\| `[A-Za-z0-9_]+` \|' <<< "${section_text}" | sed -E 's/^\| `([^`]+)` \|/\1/')

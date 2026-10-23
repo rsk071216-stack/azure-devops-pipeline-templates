@@ -89,10 +89,10 @@ jobs:
       - name: Download pinned schema
         run: curl -fsSL -o "${RUNNER_TEMP}/azure-pipelines.schema.json" "${AZP_SCHEMA_URL}"
       - name: Validate example pipelines
-        run: check-jsonschema --schemafile "${RUNNER_TEMP}/azure-pipelines.schema.json" examples/*/azure-pipelines.yml
+        run: check-jsonschema --regex-variant nonunicode --schemafile "${RUNNER_TEMP}/azure-pipelines.schema.json" examples/*/azure-pipelines.yml
       - name: Self-test - an invalid pipeline must be rejected
         run: |
-          if check-jsonschema --schemafile "${RUNNER_TEMP}/azure-pipelines.schema.json" tests/schema/invalid-extends.yml; then
+          if check-jsonschema --regex-variant nonunicode --schemafile "${RUNNER_TEMP}/azure-pipelines.schema.json" tests/schema/invalid-extends.yml; then
             echo "::error::schema validation accepted a known-invalid pipeline"
             exit 1
           fi
