@@ -24,7 +24,10 @@ extension (`service-schema.json`). We evaluated it against both kinds of files:
    `service-schema.json` pinned to an immutable commit of
    `microsoft/azure-pipelines-vscode`, using `check-jsonschema`. A negative
    fixture (`tests/schema/invalid-extends.yml`) must fail validation, proving
-   the check is effective rather than silently permissive.
+   the check is effective rather than silently permissive. The schema uses
+   regex escapes (for example `:`) that are invalid in unicode-mode ECMA
+   regular expressions, so validation runs with `--regex-variant nonunicode`;
+   with the default variant `check-jsonschema` rejects the schema itself.
 2. **Templates** are validated by `scripts/lint-templates.sh`, which enforces
    the library contract: YAML parses without duplicate keys, every parameter
    declares `name`, `type` and `displayName`, every task is pinned to a major
